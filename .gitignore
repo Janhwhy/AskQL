@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# DuckDB file + raw archive — ship a seed script instead of the data itself
+data/askql.db
+data/askql.db.wal
+data/raw/*
+!data/raw/.gitkeep
+
+node_modules/
+.next/
