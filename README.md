@@ -125,8 +125,9 @@ solve. At a few million rows, embedded beats distributed.
 In active development.
 
 - [x] Design and architecture
-- [ ] Phase 0 — data path proven
-- [ ] Phase 1 — continuous ingestion deployed
+- [x] Phase 0 — data path proven
+- [ ] Phase 1 — ingestion + historical backfill + synthetic dimensions built,
+      pending unattended scheduler
 - [ ] Phase 2 — semantic layer defined
 - [ ] Phase 3 — minimal agent
 - [ ] Phase 4 — full agent graph

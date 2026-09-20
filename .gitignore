@@ -9,6 +9,8 @@ data/askql.db
 data/askql.db.wal
 data/raw/*
 !data/raw/.gitkeep
+data/backups/
+data/logs/
 
 node_modules/
 .next/

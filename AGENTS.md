@@ -1,4 +1,4 @@
-# AskQL — Claude Code Handover
+# AskQL — Codex Handover
 
 **Read this first. It is the operating context for this repo.**
 
@@ -231,7 +231,7 @@ Langfuse tracing, caching, proactive anomaly detection, README.
 
 ```
 askql/
-├── CLAUDE.md
+├── AGENTS.md
 ├── docs/spec.md
 ├── metrics/              # YAML metric definitions
 ├── ingestion/
