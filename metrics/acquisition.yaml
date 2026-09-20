@@ -2,24 +2,40 @@ metrics:
   new_customers:
     description: "New customer signups"
     source: customers
+    join: "JOIN sales_reps ON sales_reps.rep_id = customers.rep_id"
     time_column: signed_up_at
     aggregation: count
     grain: day
-    dimensions: [region, plan_tier]
+    dimensions: [customers.region, customers.plan_tier, sales_reps.name]
 
   churned_customers:
     description: "Customers who churned"
     source: customers
+    join: "JOIN sales_reps ON sales_reps.rep_id = customers.rep_id"
     time_column: churned_at
     filter: "churned_at IS NOT NULL"
     aggregation: count
     grain: day
-    dimensions: [region, plan_tier]
+    dimensions: [customers.region, customers.plan_tier, sales_reps.name]
 
   active_customers:
     description: "Active customers right now (signed up, not yet churned)"
     source: customers
-    filter: "churned_at IS NULL"
+    join: "JOIN sales_reps ON sales_reps.rep_id = customers.rep_id"
+    filter: "customers.churned_at IS NULL"
     aggregation: count
     grain: current
-    dimensions: [region, plan_tier]
+    dimensions: [customers.region, customers.plan_tier, sales_reps.name]
+
+  churn_rate:
+    description: "Fraction of all customers who have churned (0-1, not a count)"
+    source: customers
+    join: "JOIN sales_reps ON sales_reps.rep_id = customers.rep_id"
+    expression: "CASE WHEN customers.churned_at IS NOT NULL THEN 1.0 ELSE 0.0 END"
+    aggregation: avg
+    grain: current
+    dimensions: [customers.region, customers.plan_tier, sales_reps.name]
+    note: >
+      Deliberately AVG of a 0/1 indicator over ALL customers (not COUNT of
+      just churned ones) — that's what turns a raw count into a rate.
+      Multiply by 100 for a percentage.

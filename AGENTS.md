@@ -174,13 +174,24 @@ today via a **Windows Task Scheduler** job (not an in-process APScheduler+
 deploy — nothing consumes the API yet, so an always-on deploy would sit
 idle). Idempotent: reruns skip days that already exist.
 
-### Phase 2 — metrics
-Write the YAML by hand. Verify each one by hand-writing its SQL and checking the number
-is sensible. No LLM involvement yet.
+### Phase 2 — metrics (done)
+`metrics/*.yaml` — 10 metrics across `finance.yaml`, `acquisition.yaml`,
+`support.yaml`. `metrics/loader.py` validates with Pydantic, fails loudly on
+a malformed definition. `tests/test_metrics.py` compiles every metric and
+declared dimension against the live DuckDB schema. Numbers hand-verified
+against each other (e.g. opened − resolved = backlog, exactly).
 
-### Phase 3 — minimal agent
-One node: question + metrics → SQL. `sqlglot` check. Execute. Return raw JSON. Terminal
-testing only, no UI. Ask ten questions; the failures define the next phase.
+### Phase 3 — minimal agent (done)
+`agent/graph.py` — one LangGraph node: question + metrics context → SQL (Gemini
+primary, local Ollama automatic fallback — `agent/llm.py`) → `agent/validation.py`
+(sqlglot SELECT-only) → execute on a read-only DuckDB connection → raw JSON.
+`agent/cli.py` runs the required ten questions.
+
+First run: 7/10 — 3 real failures (hallucinated filter/join, MySQL-only date
+function, silently wrong "this month" math). Fixed via a stricter prompt, not
+Phase 4's self-correction node (different mechanism, still not built). Rerun:
+10/10 — 9 correct answers matching Phase 2's hand-verified numbers, plus 1
+correctly-refused out-of-scope question.
 
 ### Phase 4 — full agent
 Add nodes one at a time, testing after each: self-correction, chart decision, narration,

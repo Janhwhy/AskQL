@@ -205,13 +205,33 @@ something to hit. `api/main.py` still exists (health/stats endpoints) but no
 longer runs a scheduler in-process, to avoid two writers touching the same
 DuckDB file.
 
-### Phase 2 — metrics
-Write the YAML by hand. Verify each one by hand-writing its SQL and checking the number
-is sensible. No LLM involvement yet.
+### Phase 2 — metrics (done)
+`metrics/*.yaml` — 10 metrics across `finance.yaml` (revenue, average_deal_size,
+units_sold), `acquisition.yaml` (new_customers, churned_customers, active_customers),
+`support.yaml` (support_tickets_opened/resolved, support_backlog,
+avg_resolution_time_days). `metrics/loader.py` validates every definition with
+Pydantic — fails loudly on a malformed one, never skips it. `tests/test_metrics.py`
+compiles every metric's SQL (and every declared dimension) against the live
+DuckDB schema, not a mock. Numbers hand-verified: e.g. `support_tickets_opened`
+− `support_tickets_resolved` = `support_backlog` exactly; `avg_resolution_time_days`
+≈ 1/(daily resolve chance) as designed.
 
-### Phase 3 — minimal agent
-One node: question + metrics → SQL. `sqlglot` check. Execute. Return raw JSON. Terminal
-testing only, no UI. Ask ten questions; the failures define the next phase.
+### Phase 3 — minimal agent (done)
+`agent/graph.py` — one LangGraph node: question + metrics context → SQL (Gemini
+primary, local Ollama automatic fallback on any Gemini failure — `agent/llm.py`)
+→ `agent/validation.py` (sqlglot SELECT-only, primary guardrail) → execute on a
+**read-only** DuckDB connection → raw JSON. `agent/cli.py` runs the required ten
+questions.
+
+First run: 7/10 correct — 3 real failures (a hallucinated filter/join not in the
+chosen metric, a MySQL-only date function DuckDB doesn't have, silently wrong
+date math for "this month"). Fixed via a stricter prompt (explicit DuckDB date
+syntax, explicit date-phrase definitions, worked examples) — not via Phase 4's
+self-correction node, which is a different mechanism (retry after an execution
+error) and deliberately still not built. Rerun: 10/10 — 9 correct answers
+(cross-checked against Phase 2's hand-verified numbers, e.g. backlog=698,
+churned=117) plus 1 correctly-refused out-of-scope question ("what's the
+weather" → no metric answers this, said so instead of guessing).
 
 ### Phase 4 — full agent
 Add nodes one at a time, testing after each: self-correction, chart decision, narration,

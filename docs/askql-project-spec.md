@@ -370,15 +370,31 @@ Write the YAML semantic layer by hand, before any LLM work. Doing it first force
 
 **Done when:** you can hand-write correct SQL for each metric.
 
-### Phase 3 — Dumbest possible agent (weekend 2)
-1. One LangGraph node: question + metric YAML → SQL.
-2. `sqlglot` check: is it a `SELECT`?
-3. Run it, return raw JSON.
-4. Test in the terminal, no UI.
+### Phase 3 — Dumbest possible agent — **done, 2026-09-20**
+1. One LangGraph node (`agent/graph.py`): question + metric YAML → SQL.
+2. `sqlglot` check (`agent/validation.py`): SELECT-only, tested against
+   DROP/DELETE/INSERT/UPDATE/ATTACH/stacked-statement attacks.
+3. Run it on a **read-only** DuckDB connection, return raw JSON.
+4. Terminal test (`agent/cli.py`), no UI.
 
-Ask ten questions. The ones it gets wrong become the roadmap.
+LLM: Gemini (`gemini-3.6-flash`) primary, local Ollama (`qwen2.5-coder:7b`)
+automatic fallback on any Gemini failure — missing key, network error, quota,
+blocked API (`agent/llm.py`).
 
-**Done when:** "how many new customers this week" returns a correct number.
+Asked ten questions, as the plan says. First run: 7/10 — three real failures:
+a hallucinated filter/join not in the chosen metric, a MySQL-only date
+function DuckDB doesn't have, and silently wrong date math for "this month."
+Fixed with a stricter prompt (explicit DuckDB date syntax, explicit
+date-phrase definitions, worked examples) — deliberately *not* by building
+Phase 4's self-correction node early, since that's a different mechanism
+(retry after a real execution error, not better up-front instructions).
+Rerun: 10/10 — 9 correct answers, cross-checked against Phase 2's
+hand-verified numbers (e.g. `support_backlog`=698, `churned_customers`=117),
+plus one correctly-refused out-of-scope question ("what's the weather" → no
+metric answers this).
+
+**Done when:** "how many new customers this week" returns a correct number — yes,
+and so do the other nine.
 
 ### Phase 4 — Real agent (weekend 3)
 Add nodes one at a time, testing after each:

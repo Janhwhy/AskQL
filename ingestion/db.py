@@ -38,8 +38,15 @@ SCHEMA_STATEMENTS = [
 ]
 
 
-def get_connection() -> duckdb.DuckDBPyConnection:
+def get_connection(read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """read_only=True for the agent (askql-project-spec.md guardrails: "agent
+    connects read-only" as a second line of defense behind sqlglot). Only
+    works when no writer connection is open on the same file at that moment
+    — fine here since the daily generator job runs briefly and exits, it
+    doesn't hold the file open."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if read_only:
+        return duckdb.connect(str(DB_PATH), read_only=True)
     con = duckdb.connect(str(DB_PATH))
     for statement in SCHEMA_STATEMENTS:
         con.execute(statement)

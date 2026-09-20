@@ -133,8 +133,10 @@ In active development.
 - [x] Design and architecture
 - [x] Phase 0/1 — simulated company built: 24 products, daily generator, ~20 months
       of history backfilled, unattended daily scheduler running
-- [ ] Phase 2 — semantic layer defined
-- [ ] Phase 3 — minimal agent
+- [x] Phase 2 — semantic layer: 10 governed metrics (`metrics/*.yaml`), Pydantic
+      validation, tested against the live schema
+- [x] Phase 3 — minimal agent: LangGraph node, Gemini + Ollama fallback,
+      sqlglot-guarded, read-only execution, 10/10 on the terminal test
 - [ ] Phase 4 — full agent graph
 - [ ] Phase 5 — frontend
 - [ ] Phase 6 — tracing, caching, anomaly detection

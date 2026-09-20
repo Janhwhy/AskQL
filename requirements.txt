@@ -6,3 +6,7 @@ faker
 pydantic
 pyyaml
 pytest
+httpx
+sqlglot
+langgraph
+google-genai

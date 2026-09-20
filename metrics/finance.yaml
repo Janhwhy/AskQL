@@ -2,29 +2,36 @@ metrics:
   revenue:
     description: "Total sales revenue"
     source: sales
-    join: "JOIN customers ON customers.customer_id = sales.customer_id JOIN products ON products.product_id = sales.product_id"
+    join: "JOIN customers ON customers.customer_id = sales.customer_id JOIN products ON products.product_id = sales.product_id JOIN sales_reps ON sales_reps.rep_id = customers.rep_id"
     time_column: sales.date
     expression: sales.amount
     aggregation: sum
     grain: day
-    dimensions: [customers.region, customers.plan_tier, products.category, products.name, sales.channel]
+    dimensions: [customers.region, customers.plan_tier, products.category, products.name, sales.channel, sales_reps.name]
     note: >
-      "Revenue by product/category/region/channel" (CLAUDE.md) is one metric
-      with governed dimensions, not four separate ones — the agent picks which
-      dimension(s) to group by from this list, never an arbitrary column.
+      "Revenue by product/category/region/channel/rep" (CLAUDE.md) is one
+      metric with governed dimensions, not five separate ones — the agent
+      picks which dimension(s) to group by from this list, never an
+      arbitrary column. sales_reps.name added 2026-09-20 — "who's my top
+      performing rep" was previously unanswerable even though every sale
+      already traces to a rep via customers.rep_id.
 
   average_deal_size:
     description: "Average sales order value"
     source: sales
+    join: "JOIN customers ON customers.customer_id = sales.customer_id JOIN products ON products.product_id = sales.product_id JOIN sales_reps ON sales_reps.rep_id = customers.rep_id"
     time_column: date
     expression: amount
     aggregation: avg
     grain: day
+    dimensions: [customers.region, customers.plan_tier, products.category, products.name, sales.channel, sales_reps.name]
 
   units_sold:
     description: "Total units sold (quantity) — usage volume distinct from dollar revenue"
     source: sales
+    join: "JOIN customers ON customers.customer_id = sales.customer_id JOIN products ON products.product_id = sales.product_id"
     time_column: date
     expression: quantity
     aggregation: sum
     grain: day
+    dimensions: [customers.region, products.category, products.name]
