@@ -8,7 +8,7 @@ type, renders it, and narrates a one-line insight.
 
 Tagline: *governed answers, in plain English.*
 
-Full design rationale lives in `docs/spec.md`. This file is the working brief — what to
+Full design rationale lives in `docs/askql-project-spec.md`. This file is the working brief — what to
 build, in what order, and the constraints that must not be violated.
 
 ---
@@ -18,8 +18,9 @@ build, in what order, and the constraints that must not be violated.
 These are design decisions already made. Do not change them without asking.
 
 1. **Single process.** DuckDB permits one writer OR many readers, never both across
-   processes. Ingestion (APScheduler) runs *inside* the FastAPI app, sharing one
-   connection. Do not spawn a separate ingestion worker. Do not add Celery.
+   processes. Data generation (`ingestion/run_daily_poll.py`, via Windows Task
+   Scheduler — not an in-process APScheduler) and the FastAPI app never write
+   concurrently. Do not spawn a separate ingestion worker. Do not add Celery.
 
 2. **The agent never sees raw schema.** It reads YAML metric definitions only. If a
    question doesn't map to a defined metric, the correct behaviour is to say so — never
@@ -32,8 +33,10 @@ These are design decisions already made. Do not change them without asking.
 4. **The LLM never generates images.** It outputs structured JSON
    (`{chart_type, x, y, series}`); Recharts renders it client-side.
 
-5. **Synthetic metrics must derive from real data, never `random()`.** Dimensions
-   (customer names, regions) may be faked. Metrics may not. See "Data model" below.
+5. **Metrics must be deterministic, never bare `random()`.** (Revised 2026-09-20:
+   project moved from real external APIs to a fully simulated company. Every
+   number comes from a seeded, reproducible formula — trend + weekday pattern +
+   seeded noise — never unseeded randomness.)
 
 6. **Latency budget: p95 under one second.** This is the product thesis. If a change
    pushes past it, flag it rather than absorbing it.
@@ -45,7 +48,7 @@ These are design decisions already made. Do not change them without asking.
 | Layer | Choice |
 |---|---|
 | Storage | DuckDB (single file) + Parquet for raw archive |
-| Ingestion | `httpx` + APScheduler, in-process |
+| Data generation | Deterministic simulation (`ingestion/simulate.py`), daily via Task Scheduler |
 | Semantic layer | YAML + Pydantic validation |
 | Metric retrieval | DuckDB VSS extension |
 | Agent | LangGraph |
@@ -65,44 +68,40 @@ Deliberately **not** used, and why:
 
 ## Data model
 
-Three layers. Keep them separate in the schema.
+**Revised 2026-09-20.** Originally polled real external APIs (GitHub/npm/PyPI/HN)
+and relabeled their numbers as business metrics. Hit real limits: rate limits,
+a platform-side block on GitHub's stargazers/subscribers endpoints, and only
+one real "product." Real ingestion code parked in `ingestion/sources/` and
+`ingestion/scheduler.py`, unused but not deleted.
 
-### Real (fetched live)
-| Source | Endpoint | Auth |
-|---|---|---|
-| GitHub | `api.github.com` | PAT in env |
-| npm | `api.npmjs.org/downloads/point/last-day/{pkg}` | none |
-| PyPI | `pypistats.org/api/packages/{pkg}/recent` | none |
-| Hacker News | `hacker-news.firebaseio.com/v0/...` | none |
+Now runs on a **fully simulated company** — `ingestion/company.py` (static:
+24 products/5 categories, regions, channels, plan tiers, reps) and
+`ingestion/simulate.py` (daily generator). Nothing fetched from the internet.
 
-GitHub requires ETag caching — send the previous ETag, and unchanged responses return 304
-without consuming rate limit. Without it the 5,000/hr limit goes fast.
-
-GitHub retains only 90 days of events, capped at 300 per repo. No backfill is possible.
-Poll continuously and store.
-
-### Derived (computed from real)
-```python
-revenue      = npm_downloads * RATE_PER_DOWNLOAD   # rate is a config constant
-support_cost = open_issues * COST_PER_TICKET
-margin       = revenue - support_cost
+### How a number gets made
 ```
-Deterministic. A real usage spike must produce a visible revenue spike.
+expected_sales(product, day) =
+    base_daily_sales
+    * (1 + growth_rate) ** day_index      # slow compounding growth
+    * weekday_factor(day)                  # B2B weekend dip
+    * seeded_noise(product, day)           # ±15%, deterministic
+    * seeded_anomaly(product, day)         # rare (2%) spike/dip day
+```
+Seeded per `(entity, product_id, day_index, row_index)` — regenerating from
+scratch reproduces identical history. Support tickets scale with a product's
+own actual buyers (joined via `sales`), not the whole company's customer list.
 
-### Synthetic (generated once, then frozen)
-Customer names, regions, sales reps, plan tiers. Use `Faker` with a fixed seed so they
-are stable across restarts. These are dimensions for grouping — never metrics.
+### Tables
+| Table | Grows | Holds |
+|---|---|---|
+| `products` | frozen | 24 rows: name, category, price, growth rate |
+| `sales_reps` | frozen | 12 rows: name, region |
+| `customers` | daily | signups, region, plan tier, `churned_at` |
+| `sales` | daily | date, product, customer, channel, amount |
+| `support_tickets` | daily | opened/closed, scoped per product's buyers |
 
-### Business mapping
-| Raw signal | Business meaning |
-|---|---|
-| npm/PyPI downloads | product usage |
-| GitHub stars | new customers |
-| GitHub issues opened | support tickets in |
-| GitHub issues closed | tickets resolved |
-| GitHub PRs merged | features shipped |
-| GitHub forks | leads |
-| HN mentions | marketing reach |
+Fact tables never duplicate region/channel onto the row — always joined
+through `customers` at query time.
 
 ---
 
@@ -113,18 +112,19 @@ are stable across restarts. These are dimensions for grouping — never metrics.
 ```yaml
 metrics:
   new_customers:
-    description: "New users acquiring the product"
-    source: github_events
-    filter: "event_type = 'WatchEvent'"
+    description: "New customer signups"
+    source: customers
+    filter: "signed_up_at = {grain}"
     aggregation: count
     grain: day
 
   revenue:
-    description: "Modeled revenue from product usage"
-    source: npm_downloads
-    expression: "downloads * 0.02"
+    description: "Total sales revenue"
+    source: sales
+    join: "sales JOIN customers ON customers.customer_id = sales.customer_id"
+    expression: "SUM(sales.amount)"
+    group_by: ["customers.region", "products.category"]
     grain: day
-    note: "Derived metric — usage-based model, not booked revenue"
 ```
 
 Validate with Pydantic on load. Fail loudly on a malformed definition rather than
@@ -161,50 +161,18 @@ are a feature, not debug output.
 
 ## Build order
 
-Do not skip ahead. Phase 1 is time-gated — data must accumulate before later phases have
-anything to chart.
+**Revised 2026-09-20.** Phase 0/1 used to be time-gated — real data had to
+accumulate before later phases had anything to chart. That's gone: simulated
+history is a deterministic function of day-number, so a full multi-year
+backfill is one instant local computation, not a wait. Done.
 
-### Phase 0 — prove the data path
-Fetch one repo, write to DuckDB, read it back. Run twice, see two rows. Done.
-
-```python
-import duckdb, httpx
-
-con = duckdb.connect("askql.db")
-con.execute("""CREATE TABLE IF NOT EXISTS repo_snapshots
-               (repo TEXT, stars INT, open_issues INT, captured_at TIMESTAMP)""")
-
-r = httpx.get("https://api.github.com/repos/langchain-ai/langchain",
-              headers={"Authorization": f"Bearer {TOKEN}"})
-d = r.json()
-con.execute("INSERT INTO repo_snapshots VALUES (?, ?, ?, now())",
-            [d["full_name"], d["stargazers_count"], d["open_issues_count"]])
-```
-
-### Phase 1 — accumulate (start this first, leave it running)
-APScheduler inside FastAPI, polling every 15–30 min. ETag caching. All four sources.
-Deploy with a persistent volume.
-
-```python
-from contextlib import asynccontextmanager
-from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI
-import duckdb
-
-con = duckdb.connect("askql.db")
-
-@asynccontextmanager
-async def lifespan(app):
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(poll_all_sources, "interval", seconds=1800, args=[con])
-    scheduler.start()
-    yield
-    scheduler.shutdown()
-
-app = FastAPI(lifespan=lifespan)
-```
-
-Done when: 48 hours unattended, row count climbing.
+### Phase 0/1 — prove the data path, then generate it (done)
+`ingestion/company.py` defines the company (frozen). `ingestion/simulate.py`
+generates one day at a time, deterministically. `run_backfill.py` loops it
+from `company.FOUNDED` to yesterday. `run_daily_poll.py` runs it once for
+today via a **Windows Task Scheduler** job (not an in-process APScheduler+
+deploy — nothing consumes the API yet, so an always-on deploy would sit
+idle). Idempotent: reruns skip days that already exist.
 
 ### Phase 2 — metrics
 Write the YAML by hand. Verify each one by hand-writing its SQL and checking the number
@@ -232,7 +200,7 @@ Langfuse tracing, caching, proactive anomaly detection, README.
 ```
 askql/
 ├── AGENTS.md
-├── docs/spec.md
+├── docs/askql-project-spec.md
 ├── metrics/              # YAML metric definitions
 ├── ingestion/
 │   ├── sources/          # one module per API
@@ -268,7 +236,8 @@ askql/
 - **Single-writer DuckDB** caps us at one API instance. Scaling past that means moving to
   Postgres. Deliberate choice for latency.
 - **No DB-level permissions.** `sqlglot` validation substitutes for a read-only role.
-- **Modeled revenue is not real revenue.** Always labelled as derived in output.
+- **All company data is simulated.** Always labelled as such — a demo company
+  (Northbeam), not a real business.
 - **Text-to-SQL is a crowded category.** The differentiation is governance and ambiguity
   handling, not the chatbot itself.
 
@@ -280,9 +249,10 @@ askql/
       already taken on npm and as a GitHub org by an unrelated, existing project also
       called "AskQL" (a query language). Real collision, not a squatter — revisit the
       name before this ships anywhere public.
-- [x] ~~Which repos and packages to track~~ — ranked by events/hour (`ingestion/config.py`
-      has the result): all four langchain-ai repos land 3.7-5.4 events/hr, validated.
-- [x] ~~`RATE_PER_DOWNLOAD`~~ — `0.002` (~$2 per 1,000 downloads), landing modeled
-      revenue around $6M ARR at current volumes. Provisional, see rationale in
-      `ingestion/config.py`.
+- [x] ~~Data source strategy~~ — **2026-09-20: pivoted from real GitHub/npm/PyPI
+      polling to a fully simulated company** (`ingestion/company.py` +
+      `ingestion/simulate.py`). Real ingestion code parked, not deleted, in
+      `ingestion/sources/`.
+- [ ] Real-data cleaning/dedup/ID-resolution layer — future scope, no real
+      source to design against yet.
 - [ ] Proactive anomaly alerts: v1 or v2

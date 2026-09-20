@@ -35,11 +35,12 @@ Metrics are defined once, in YAML, as a business decision — not a model guess:
 ```yaml
 metrics:
   revenue:
-    description: "Modeled revenue from product usage"
-    source: npm_downloads
-    expression: "downloads * 0.02"
+    description: "Total sales revenue"
+    source: sales
+    join: "sales JOIN customers ON customers.customer_id = sales.customer_id"
+    expression: "SUM(sales.amount)"
+    group_by: ["customers.region", "products.category"]
     grain: day
-    note: "Derived metric — usage-based model, not booked revenue"
 ```
 
 The agent reads these definitions. It never sees the raw schema. If a question doesn't
@@ -72,22 +73,27 @@ for the rest of the session.
 
 ## The data
 
-Real companies don't publish live sales figures, and a demo on a static CSV undercuts the
-whole premise. So AskQL runs on a fictional company whose metrics are driven by **real,
-live, public data**.
+A demo on a static CSV undercuts the whole premise — a dashboard-in-a-chat only means
+something if the numbers actually move day to day. So AskQL runs on **Northbeam**, a
+fully simulated B2B SaaS company: 24 products across 5 categories, regions, sales
+channels, reps, and a growing customer base, all clearly labelled as synthetic.
 
-| Layer | Source | Example |
+Nothing here is scraped from the internet. Every number comes from a seeded, deterministic
+formula — trend + weekday pattern + seeded noise + rare seeded anomaly days — computed
+fresh once per day. No `random()` anywhere in the metric path: regenerating the full
+history from scratch reproduces it exactly, and a seeded anomaly day is a real event the
+bot can explain, not noise.
+
+| Table | Grows | What it holds |
 |---|---|---|
-| **Real** | npm, PyPI, GitHub, Hacker News | downloads, issues, stars, mentions |
-| **Derived** | computed from real | `revenue = downloads × rate` |
-| **Synthetic** | generated once, frozen | customer names, regions, reps |
+| `products` | frozen | 24 products, 5 categories, price, growth rate |
+| `customers` | daily | signups, region, plan tier, churn |
+| `sales` | daily | date, product, customer, channel, amount |
+| `support_tickets` | daily | opened/closed, scoped to each product's own buyers |
 
-The rule: **metrics move because something real moved.** No `random()` anywhere in the
-metric path. A genuine npm spike produces a revenue spike in the chart, which trips the
-anomaly detector, which makes the bot say *"revenue jumped 18%, driven by a usage surge."*
-
-Synthetic data is used only for dimensions — nobody checks whether "Acme Corp" is real,
-but everybody checks whether the numbers move sensibly.
+Dimensions (region, channel, plan tier) are never duplicated onto fact rows — a chart
+grouped by region does a live SQL `JOIN` through `customers` at ask-time, the same lookup
+an analyst would do by hand, just in under a second instead of a week.
 
 ---
 
@@ -125,9 +131,8 @@ solve. At a few million rows, embedded beats distributed.
 In active development.
 
 - [x] Design and architecture
-- [x] Phase 0 — data path proven
-- [ ] Phase 1 — ingestion + historical backfill + synthetic dimensions built,
-      pending unattended scheduler
+- [x] Phase 0/1 — simulated company built: 24 products, daily generator, ~20 months
+      of history backfilled, unattended daily scheduler running
 - [ ] Phase 2 — semantic layer defined
 - [ ] Phase 3 — minimal agent
 - [ ] Phase 4 — full agent graph

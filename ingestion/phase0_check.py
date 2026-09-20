@@ -1,4 +1,11 @@
-"""Phase 0: prove the data path. Fetch one repo, write to DuckDB, read it back.
+"""PARKED, unused as of 2026-09-20 — Phase 0 for the old GitHub-based
+ingestion, superseded by the simulated company (ingestion/company.py +
+ingestion/simulate.py). Do NOT run this against the live data/askql.db —
+it would write a stray `repo_snapshots` table into the simulated company's
+database and isn't idempotent-safe alongside the new schema. Left for
+historical reference only.
+
+Phase 0: prove the data path. Fetch one repo, write to DuckDB, read it back.
 
 Run twice, see two rows:
     python3 ingestion/phase0_check.py

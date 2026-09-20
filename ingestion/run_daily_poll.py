@@ -1,8 +1,10 @@
-"""Daily entry point for Windows Task Scheduler — one poll cycle + one backup,
-then exit. Replaces the continuous in-process APScheduler for now: with GitHub
-event volume well under its 300-event cap per day and npm/pypi already daily
-aggregates, a once-a-day run loses nothing, and it means the machine only
-needs to be on briefly at trigger time, not running a server all day.
+"""Daily entry point for Windows Task Scheduler — generates today's row of
+company data (sales, tickets, new customers, churn) + one backup, then exits.
+
+2026-09-20: repointed at the simulated-company generator (ingestion/simulate.py)
+instead of polling GitHub/npm/pypi/HN. Network-readiness wait kept even though
+this no longer calls the internet — harmless, and this file stays the single
+Task Scheduler entry point so the registered task doesn't need re-creating.
 
 Logs to data/logs/daily_poll.log since Task Scheduler runs headless — check
 that file to confirm a run actually happened.
@@ -31,16 +33,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from datetime import date
+
 from ingestion import db
 from ingestion.backup import backup_db
-from ingestion.scheduler import poll_all_sources
+from ingestion.simulate import bootstrap, simulate_day
 
-# Task Scheduler's WakeToRun/StartWhenAvailable can fire this the instant the
-# machine wakes or logs in, before Wi-Fi has reconnected — a bare run then
-# fails every source with DNS errors (observed 2026-09-20: 20/20 calls failed,
-# getaddrinfo failed). Wait for real DNS resolution before touching any source.
+# Kept from the GitHub-polling era in case a future source needs the network
+# again — harmless no-op now, the generator itself makes no network calls.
 NETWORK_CHECK_HOST = "api.github.com"
-NETWORK_WAIT_ATTEMPTS = 10
+NETWORK_WAIT_ATTEMPTS = 3
 NETWORK_WAIT_SECONDS = 6
 
 
@@ -60,15 +62,10 @@ def wait_for_network() -> bool:
 
 def main() -> None:
     logger.info("daily poll starting")
-    if not wait_for_network():
-        logger.error(
-            "no network after %d attempts, aborting run without touching sources",
-            NETWORK_WAIT_ATTEMPTS,
-        )
-        return
     con = db.get_connection()
     try:
-        poll_all_sources(con)
+        bootstrap(con)
+        simulate_day(con, date.today())
         backup_db(con)
         logger.info("daily poll done")
     finally:
