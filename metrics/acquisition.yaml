@@ -1,0 +1,25 @@
+metrics:
+  new_customers:
+    description: "New customer signups"
+    source: customers
+    time_column: signed_up_at
+    aggregation: count
+    grain: day
+    dimensions: [region, plan_tier]
+
+  churned_customers:
+    description: "Customers who churned"
+    source: customers
+    time_column: churned_at
+    filter: "churned_at IS NOT NULL"
+    aggregation: count
+    grain: day
+    dimensions: [region, plan_tier]
+
+  active_customers:
+    description: "Active customers right now (signed up, not yet churned)"
+    source: customers
+    filter: "churned_at IS NULL"
+    aggregation: count
+    grain: current
+    dimensions: [region, plan_tier]

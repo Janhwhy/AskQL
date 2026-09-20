@@ -1,7 +1,8 @@
 duckdb
-httpx
 python-dotenv
 fastapi
 uvicorn[standard]
-apscheduler
 faker
+pydantic
+pyyaml
+pytest

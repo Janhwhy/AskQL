@@ -1,0 +1,33 @@
+metrics:
+  support_tickets_opened:
+    description: "Support tickets opened"
+    source: support_tickets
+    join: "JOIN products ON products.product_id = support_tickets.product_id"
+    time_column: opened_at
+    aggregation: count
+    grain: day
+    dimensions: [products.name, products.category]
+
+  support_tickets_resolved:
+    description: "Support tickets resolved (closed)"
+    source: support_tickets
+    time_column: closed_at
+    filter: "status = 'closed'"
+    aggregation: count
+    grain: day
+
+  support_backlog:
+    description: "Open support tickets awaiting resolution, right now"
+    source: support_tickets
+    filter: "status = 'open'"
+    aggregation: count
+    grain: current
+
+  avg_resolution_time_days:
+    description: "Average time to resolve a support ticket, in days"
+    source: support_tickets
+    time_column: closed_at
+    filter: "status = 'closed'"
+    expression: "date_diff('day', opened_at, closed_at)"
+    aggregation: avg
+    grain: day

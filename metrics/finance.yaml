@@ -1,0 +1,30 @@
+metrics:
+  revenue:
+    description: "Total sales revenue"
+    source: sales
+    join: "JOIN customers ON customers.customer_id = sales.customer_id JOIN products ON products.product_id = sales.product_id"
+    time_column: sales.date
+    expression: sales.amount
+    aggregation: sum
+    grain: day
+    dimensions: [customers.region, customers.plan_tier, products.category, products.name, sales.channel]
+    note: >
+      "Revenue by product/category/region/channel" (CLAUDE.md) is one metric
+      with governed dimensions, not four separate ones — the agent picks which
+      dimension(s) to group by from this list, never an arbitrary column.
+
+  average_deal_size:
+    description: "Average sales order value"
+    source: sales
+    time_column: date
+    expression: amount
+    aggregation: avg
+    grain: day
+
+  units_sold:
+    description: "Total units sold (quantity) — usage volume distinct from dollar revenue"
+    source: sales
+    time_column: date
+    expression: quantity
+    aggregation: sum
+    grain: day
