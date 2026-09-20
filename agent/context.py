@@ -26,3 +26,16 @@ def metrics_context(metrics: dict[str, Metric]) -> str:
         if m.note:
             lines.append(f"    note: {m.note.strip()}")
     return "\n".join(lines)
+
+
+def clarifications_block(clarifications: dict[str, str]) -> str:
+    """Renders session-remembered ambiguity resolutions for the prompt, so the
+    agent doesn't re-ask about something the user already clarified this
+    session (CLAUDE.md: the ambiguity node "remembers the answer for the
+    session"). Empty string when nothing's been clarified yet."""
+    if not clarifications:
+        return ""
+    lines = ["Already clarified earlier this session — do not ask about these again:"]
+    for key, answer in clarifications.items():
+        lines.append(f"- {key}: {answer}")
+    return "\n".join(lines)
