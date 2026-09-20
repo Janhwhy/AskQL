@@ -46,26 +46,39 @@ Rules:
 1. Pick exactly ONE metric. Use its `source`, `join`, `expression`, and base filter
    EXACTLY as listed — do not add, remove, or combine anything from another metric.
    If a metric has no `join` listed, do not reference any table other than its `source`.
-2. You may add a date range condition on the metric's `time_column`. Today's date is
-   {today}. Use these exact definitions, do not guess:
+2. A date range condition on the metric's `time_column` is OPTIONAL, even when
+   `grain: day` — that field only means a `time_column` EXISTS to filter on if the
+   question asks for one. "How many X in total" / "of all time" / no time mentioned
+   at all means NO date condition — aggregate over every row, don't refuse and don't
+   invent a date range that wasn't asked for.
+3. When a date range IS asked for, today's date is {today}. Use these exact
+   definitions, do not guess:
    - "yesterday" = {today} minus 1 day
    - "this month" = from the 1st of {today}'s month through {today} (not last month)
    - "last N days" = from {today} minus N days through {today}
-3. DuckDB date syntax only — never MySQL/Postgres-specific functions:
+4. DuckDB date syntax only — never MySQL/Postgres-specific functions:
    - subtract: `time_column >= DATE '{today}' - INTERVAL 30 DAY`
    - date diff in days: `date_diff('day', start_col, end_col)` (DuckDB arg order:
      unit, start, end — NOT `DATEDIFF(end, start)`)
    - never use `DATE_SUB(...)` — it does not exist in DuckDB.
-4. You may GROUP BY one of that metric's listed "allowed group-by dimensions" if the
+5. You may GROUP BY one of that metric's listed "allowed group-by dimensions" if the
    question asks for a breakdown — never any other column.
-5. Output ONLY the raw SQL: one statement, no markdown fences, no explanation, no
+6. Output ONLY the raw SQL: one statement, no markdown fences, no explanation, no
    trailing semicolon-separated extra statements.
-6. If no metric here actually answers the question, output exactly:
-   {no_metric_sentinel} <one sentence reason>
-7. If two or more DIFFERENT metrics could plausibly answer this question and the
-   question doesn't say which one it means (and it isn't already resolved in the
-   "Already clarified" list above), do NOT guess. Output exactly:
-   {ambiguous_sentinel} <one short clarifying question to ask the user> | <comma-separated candidate metric names>
+7. NO_METRIC vs AMBIGUOUS — these are different, do not confuse them:
+   - Use {no_metric_sentinel} <one sentence reason> ONLY when the question's TOPIC
+     isn't covered by ANY metric above at all (e.g. weather, headcount, competitors).
+   - Use {ambiguous_sentinel} <one short clarifying question> | <comma-separated
+     candidate metric names> whenever the topic IS covered but the question is
+     vague enough that 2+ metrics could plausibly answer it (e.g. "how's support
+     doing" — support IS covered, by four different metrics, so ask which one; do
+     NOT call this NO_METRIC just because the question itself doesn't name a
+     metric). A vague question about a covered topic is ALWAYS ambiguous, never
+     "not covered." Skip this if already resolved in "Already clarified" above.
+
+Example (aggregate, no date range — "in total" means every row):
+Q: "How many customers have churned in total?"
+SELECT COUNT(*) FROM customers WHERE churned_at IS NOT NULL
 
 Example (aggregate, date-filtered):
 Q: "How many new customers signed up yesterday?"
@@ -75,11 +88,39 @@ Example (grouped by a listed dimension):
 Q: "Revenue by region, last 7 days?"
 SELECT customers.region, SUM(sales.amount) FROM sales JOIN customers ON customers.customer_id = sales.customer_id WHERE sales.date >= DATE '{today}' - INTERVAL 7 DAY GROUP BY customers.region
 
-Example (ambiguous):
+Example (ambiguous — topic covered, multiple metrics fit, question doesn't say which):
 Q: "How's support doing?"
 {ambiguous_sentinel} Do you mean tickets opened, tickets resolved, or the current backlog? | support_tickets_opened, support_tickets_resolved, support_backlog
 
+Example (ambiguous — same pattern, a different vague phrasing):
+Q: "Tell me about our customers."
+{ambiguous_sentinel} Do you want new signups, churn, active customer count, or revenue by customer segment? | new_customers, churned_customers, active_customers, revenue
+
 Question: {question}
+SQL:"""
+
+RESOLVED_PROMPT = """You are a SQL generator for a business analytics tool. Output must run on DuckDB.
+
+The user already told us which metric they want — this is fully resolved, not ambiguous.
+Use ONLY this metric, exactly as defined. Do not reconsider other metrics, do not ask
+anything else:
+
+{context}
+
+Rules:
+1. Use this metric's `source`, `join`, `expression`, and base filter EXACTLY as listed.
+2. A date range condition on `time_column` is OPTIONAL — only add one if the question
+   asks for a specific period. Today's date is {today}. "in total"/"of all time"/no
+   time mentioned means NO date condition.
+3. When a date range IS asked for: "yesterday" = {today} minus 1 day, "this month" =
+   1st of {today}'s month through {today}, "last N days" = {today} minus N days through {today}.
+4. DuckDB date syntax only (`DATE '{today}' - INTERVAL N DAY`, `date_diff('day', a, b)`)
+   — never MySQL functions like `DATE_SUB`.
+5. You may GROUP BY one of the listed "allowed group-by dimensions" if the question
+   asks for a breakdown.
+6. Output ONLY the raw SQL: one statement, no markdown fences, no explanation.
+
+Original question: {question}
 SQL:"""
 
 CORRECT_PROMPT = """The SQL you generated failed. Fix ONLY the SQL, using the same
@@ -117,6 +158,7 @@ class AgentState(TypedDict):
     narration: Optional[str]
     pending_clarification: Optional[dict]
     clarifications: dict[str, str]
+    clarification_answer: Optional[str]
 
 
 def _strip_code_fence(text: str) -> str:
@@ -131,17 +173,67 @@ def _default_json(o):
     return str(o)
 
 
+def _resolve_clarification(answer: str, candidates: list[str], metrics: dict) -> Optional[str]:
+    """Deterministic best-effort match of a free-text clarification answer to
+    one of the offered candidate metric names, by keyword overlap against
+    each candidate's name + description.
+
+    Doing this in code rather than asking the LLM to re-correlate its own
+    prior question with a fresh prompt matters in practice — a 7B local
+    model (the Ollama fallback) reliably failed to make this connection even
+    when the raw answer text was placed directly in its prompt, re-asking
+    the same clarifying question instead of resolving it. A plain keyword
+    match doesn't have that failure mode. Same philosophy as chart.py's
+    decide_chart: deterministic where a deterministic answer exists, don't
+    leave it to LLM judgment.
+    """
+    answer_words = set(re.findall(r"[a-z]+", answer.lower()))
+    if not answer_words:
+        return None
+    best, best_score = None, 0
+    for name in candidates:
+        metric = metrics.get(name)
+        haystack = name.replace("_", " ")
+        if metric:
+            haystack += " " + metric.description
+        haystack_words = set(re.findall(r"[a-z]+", haystack.lower()))
+        score = len(answer_words & haystack_words)
+        if score > best_score:
+            best, best_score = name, score
+    return best
+
+
 def generate_sql(state: AgentState) -> AgentState:
     metrics = load_metrics()
-    context = metrics_context(metrics)
 
-    # A resolved clarification answer arrives via `question` on the re-invoke
-    # (see `ask()`) — fold it into session memory before regenerating.
+    # A resolved clarification answer arrives via `clarification_answer` on
+    # the re-invoke (see `ask()`). Must be a declared AgentState field, not
+    # an ad-hoc key: LangGraph filters invoke() input against the graph's
+    # schema, so an undeclared key is silently dropped before any node ever
+    # sees it (this broke the whole round-trip until this field was added).
     clarifications = dict(state.get("clarifications") or {})
     pending = state.get("pending_clarification")
-    if pending and state.get("_clarification_answer"):
-        clarifications[pending["key"]] = state["_clarification_answer"]
+    answer = state.get("clarification_answer")
 
+    if pending and answer:
+        resolved_name = _resolve_clarification(answer, pending["candidates"], metrics)
+        if resolved_name:
+            # Fully resolved — narrow the prompt to just this one metric so
+            # there's nothing left to be ambiguous about, instead of hoping
+            # the LLM notices a clarification block buried in full context.
+            prompt = RESOLVED_PROMPT.format(
+                context=metrics_context({resolved_name: metrics[resolved_name]}),
+                question=state["question"],
+                today=date.today().isoformat(),
+            )
+            raw = generate(prompt)
+            text = _strip_code_fence(raw)
+            return {**state, "sql": text, "clarifications": clarifications, "pending_clarification": None}
+        # Couldn't confidently match the answer to a candidate — fall back
+        # to full context with the raw answer noted, best effort.
+        clarifications[pending["key"]] = answer
+
+    context = metrics_context(metrics)
     prompt = GENERATE_PROMPT.format(
         context=context,
         clarifications=clarifications_block(clarifications),
@@ -299,7 +391,7 @@ def ask(question: str, thread_id: Optional[str] = None, clarification_answer: Op
     if clarification_answer is not None and thread_id is not None:
         prior = app.get_state(config).values
         question = prior.get("question", question)
-        state_in = {**prior, "question": question, "_clarification_answer": clarification_answer}
+        state_in = {**prior, "question": question, "clarification_answer": clarification_answer}
     else:
         state_in = {
             "question": question,
@@ -312,6 +404,7 @@ def ask(question: str, thread_id: Optional[str] = None, clarification_answer: Op
             "narration": None,
             "pending_clarification": None,
             "clarifications": {},
+            "clarification_answer": None,
         }
 
     result = app.invoke(state_in, config=config)

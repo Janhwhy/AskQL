@@ -193,9 +193,23 @@ Phase 4's self-correction node (different mechanism, still not built). Rerun:
 10/10 — 9 correct answers matching Phase 2's hand-verified numbers, plus 1
 correctly-refused out-of-scope question.
 
-### Phase 4 — full agent
-Add nodes one at a time, testing after each: self-correction, chart decision, narration,
-ambiguity clarification.
+### Phase 4 — full agent (done)
+Full graph in `agent/graph.py`: `generate_sql → run_sql → (error, retries==0) →
+correct_sql → run_sql`, success path `→ decide_chart → narrate → END`. Chart
+decision (`agent/chart.py`) is a pure deterministic function of result shape,
+no LLM call. Ambiguity resolution persists per `thread_id` via LangGraph's
+`MemorySaver`.
+
+Three real bugs found and fixed via live testing (not just mocked tests):
+chart y/series inversion on time+dimension results, `grain: day` misread as
+"date filter required" (broke all-time totals), and the ambiguity
+clarification round-trip being completely broken because the resolved
+answer wasn't a declared `AgentState` field — LangGraph silently drops
+`invoke()` input keys outside the schema. Fixed the field, and additionally
+resolve the answer to a specific metric deterministically in code
+(`_resolve_clarification`) rather than trusting the LLM to re-correlate its
+own prior question — the local Ollama fallback reliably failed at that even
+after the plumbing fix. Final run: 13/13 scenarios correct.
 
 ### Phase 5 — frontend
 Next.js chat, Recharts, SSE streaming. Built last because the agent's output contract is

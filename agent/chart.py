@@ -33,8 +33,15 @@ def decide_chart(columns: list[str], rows: list[tuple]) -> ChartDecision:
     if time_idx is not None:
         other_idx = [i for i in range(len(columns)) if i != time_idx]
         x = columns[time_idx]
-        y = columns[other_idx[0]] if other_idx else None
-        series = columns[other_idx[1]] if len(other_idx) > 1 else None
+        if not other_idx:
+            return {"chart_type": "line", "x": x, "y": None, "series": None}
+        # y must be the numeric value to plot, series the categorical
+        # grouping (e.g. region) for multiple lines — column ORDER doesn't
+        # tell you which is which, so pick by type like the bar branch does.
+        num_idx = next((i for i in other_idx if isinstance(first_row[i], (int, float))), other_idx[0])
+        series_idx = next((i for i in other_idx if i != num_idx), None)
+        y = columns[num_idx]
+        series = columns[series_idx] if series_idx is not None else None
         return {"chart_type": "line", "x": x, "y": y, "series": series}
 
     if len(columns) >= 2:

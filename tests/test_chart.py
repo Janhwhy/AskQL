@@ -24,9 +24,19 @@ def test_time_column_is_line():
 def test_time_plus_dimension_is_line_with_series():
     rows = [(date(2026, 9, 18), "EMEA", 100.0), (date(2026, 9, 18), "APAC", 80.0)]
     result = decide_chart(["day", "region", "revenue"], rows)
-    assert result["chart_type"] == "line"
-    assert result["x"] == "day"
-    assert set([result["y"], result["series"]]) == {"region", "revenue"}
+    # y must land on the NUMERIC column and series on the categorical one,
+    # regardless of column order in the SQL result — a loose set() check
+    # here previously hid a real y/series inversion bug.
+    assert result == {"chart_type": "line", "x": "day", "y": "revenue", "series": "region"}
+
+
+def test_time_plus_dimension_column_order_reversed_still_correct():
+    """Same shape as above but with region/revenue swapped in column order —
+    catches the exact bug a positional (not type-based) y/series pick would
+    reintroduce."""
+    rows = [(date(2026, 9, 18), 100.0, "EMEA"), (date(2026, 9, 18), 80.0, "APAC")]
+    result = decide_chart(["day", "revenue", "region"], rows)
+    assert result == {"chart_type": "line", "x": "day", "y": "revenue", "series": "region"}
 
 
 def test_categorical_no_time_is_bar():

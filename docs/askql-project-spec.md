@@ -396,12 +396,35 @@ metric answers this).
 **Done when:** "how many new customers this week" returns a correct number — yes,
 and so do the other nine.
 
-### Phase 4 — Real agent (weekend 3)
-Add nodes one at a time, testing after each:
-1. Self-correction — feed SQL errors back, retry once
-2. Chart-type decision — output `{chart_type, x, y}` from result shape
-3. Narration — one sentence of insight
-4. **Ambiguity clarification** — the differentiator
+### Phase 4 — Real agent — **done, 2026-09-20**
+1. Self-correction — `agent/graph.py`'s `correct_sql` node feeds the failed
+   SQL and error back, retries once, gives up honestly if the retry also fails.
+2. Chart-type decision — `agent/chart.py`, `{chart_type, x, y, series}` from
+   result shape. Pure function, no LLM call, no network round-trip.
+3. Narration — one sentence, generated from the actual result rows.
+4. **Ambiguity clarification** — the differentiator. Persists per session via
+   LangGraph's `MemorySaver` checkpointer.
+
+Audited and fixed three real bugs found via live testing, not just mocked
+control-flow tests: a chart y/series inversion on time+dimension results
+(numeric and categorical columns swapped roles because the line-chart branch
+picked by column position instead of type), `grain: day` on a metric being
+misread as "a date filter is mandatory" (broke all-time totals like "how many
+customers have churned in total"), and — the significant one — the entire
+ambiguity clarification round-trip silently not working, because the
+resolved answer wasn't declared as a field on the graph's state schema and
+LangGraph drops `invoke()` input keys it doesn't recognize. Fixed by
+declaring the field, and by resolving the clarification answer to a specific
+metric **deterministically in code** (keyword-overlap match) instead of
+asking the LLM to re-correlate its own prior question across turns — the
+local Ollama fallback model reliably failed at that even after the plumbing
+was fixed. Re-verified live, end to end, against the same model that
+originally failed both scenarios.
+
+Final live run: 13/13 scenarios correct — 10 direct answers (right chart
+type, real narration, numbers cross-checked against earlier hand-verified
+figures), 2 ambiguity round-trips that asked then correctly resolved, 1
+correct out-of-scope refusal.
 
 ### Phase 5 — Frontend (weekend 4)
 Next.js chat box, Recharts rendering the agent's JSON, SSE streaming.

@@ -233,9 +233,42 @@ error) and deliberately still not built. Rerun: 10/10 — 9 correct answers
 churned=117) plus 1 correctly-refused out-of-scope question ("what's the
 weather" → no metric answers this, said so instead of guessing).
 
-### Phase 4 — full agent
-Add nodes one at a time, testing after each: self-correction, chart decision, narration,
-ambiguity clarification.
+### Phase 4 — full agent (done)
+Full graph in `agent/graph.py`: `generate_sql → run_sql → (error, retries==0) →
+correct_sql → run_sql`, success path `→ decide_chart → narrate → END`. Chart
+decision (`agent/chart.py`) is a pure deterministic function of result shape —
+no LLM call, per constraint 4. Ambiguity resolution persists across calls
+sharing a `thread_id` via LangGraph's `MemorySaver`.
+
+Audited and fixed three real bugs found while verifying this against a live
+LLM, not just the mocked control-flow tests:
+- **Chart y/series inversion** — for a time-series-plus-dimension result
+  (e.g. "revenue by region over time"), `y` and `series` landed backwards
+  (categorical column as `y`, numeric as `series`) because the line-chart
+  branch picked by column position instead of type, unlike the bar-chart
+  branch which already did this correctly. The test that should have caught
+  it used a loose `set()` assertion that didn't check which field got which
+  role. Fixed both the function and the test.
+- **`grain: day` misread as "date filter required"** — asking for an
+  all-time total ("how many customers have churned in total") got wrongly
+  refused as unanswerable. Fixed via an explicit prompt rule + example: a
+  `time_column` is available to filter on, never mandatory.
+- **The ambiguity clarification round-trip was completely broken** — the
+  resolved answer (`clarification_answer`) never reached any node because it
+  wasn't declared as a field on the `AgentState` TypedDict, and LangGraph
+  filters `invoke()` input against the graph's declared schema, silently
+  dropping anything else. Fixed by declaring the field, **and** by resolving
+  the answer to a specific metric deterministically in code
+  (`_resolve_clarification`, keyword-overlap match) rather than trusting the
+  LLM to re-correlate its own prior question from a prompt block — a 7B
+  local model reliably failed at that even once the plumbing was fixed,
+  same reasoning as making chart decision deterministic. Re-verified live,
+  end to end, against the same model that originally failed.
+
+Final live run: 13/13 scenarios behaved correctly (10 direct answers with
+correct chart types and narration, 2 ambiguity round-trips that correctly
+asked then correctly resolved, 1 correct out-of-scope refusal) — all cross-
+checked against numbers hand-verified in earlier phases.
 
 ### Phase 5 — frontend
 Next.js chat, Recharts, SSE streaming. Built last because the agent's output contract is

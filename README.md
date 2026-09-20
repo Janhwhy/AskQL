@@ -137,7 +137,9 @@ In active development.
       validation, tested against the live schema
 - [x] Phase 3 — minimal agent: LangGraph node, Gemini + Ollama fallback,
       sqlglot-guarded, read-only execution, 10/10 on the terminal test
-- [ ] Phase 4 — full agent graph
+- [x] Phase 4 — full agent graph: self-correction (retry once), deterministic
+      chart-type decision, narration, ambiguity clarification with session
+      memory — 13/13 on the live test suite
 - [ ] Phase 5 — frontend
 - [ ] Phase 6 — tracing, caching, anomaly detection
 

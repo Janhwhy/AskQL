@@ -6,7 +6,8 @@ Phase 4 plan's verification section).
 """
 
 import agent.graph as graph_module
-from agent.graph import ask
+from agent.graph import _resolve_clarification, ask
+from metrics.loader import load_metrics
 
 
 def test_self_correction_retries_once_then_succeeds(monkeypatch):
@@ -69,4 +70,27 @@ def test_ambiguity_round_trip_remembers_clarification(monkeypatch):
     assert "rows" in second
     # 3 prompts total: initial (ambiguous), regenerate (resolved), then narrate
     assert len(prompts) == 3
-    assert "tickets opened" in prompts[1]  # clarification was actually fed back into the prompt
+    # The resolved prompt must be narrowed to ONLY the matched metric -- not
+    # just "contains the answer text somewhere" (that previously passed by
+    # coincidence, via the metric's own description containing the phrase,
+    # and would NOT have caught the real bug this once had: the
+    # clarification_answer field being silently dropped because it wasn't
+    # declared in AgentState, which LangGraph filters invoke() input
+    # against. Checking the OTHER candidate is absent is the real proof the
+    # narrowing happened, not a lucky substring match.)
+    assert "support_tickets_opened" in prompts[1]
+    assert "support_tickets_resolved" not in prompts[1]
+
+
+def test_resolve_clarification_matches_correct_candidate():
+    """Unit test of the deterministic resolver in isolation -- this is what
+    replaced asking the LLM to re-correlate its own prior question, after
+    live testing showed a 7B local model reliably failed at that and just
+    re-asked the same clarifying question instead of resolving it."""
+    metrics = load_metrics()
+    candidates = ["support_tickets_opened", "support_tickets_resolved", "support_backlog"]
+
+    assert _resolve_clarification("tickets opened", candidates, metrics) == "support_tickets_opened"
+    assert _resolve_clarification("resolved ones", candidates, metrics) == "support_tickets_resolved"
+    assert _resolve_clarification("the backlog", candidates, metrics) == "support_backlog"
+    assert _resolve_clarification("xyzzy nonsense", candidates, metrics) is None
