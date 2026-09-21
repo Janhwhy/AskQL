@@ -135,14 +135,14 @@ function KpiTile({ rows, y }: { rows: Row[]; y: string }) {
   );
 }
 
-function LineChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
+function LineChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecision; height: number | `${number}%` }) {
   const { x, y, series } = chart;
   if (!x || !y) return null;
 
   if (series) {
     const { data, seriesKeys } = pivotBySeries(rows, x, y, series);
     return (
-      <ResponsiveContainer width="100%" height={280}>
+      <ResponsiveContainer width="100%" height={height}>
         <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
           <XAxis
@@ -172,6 +172,7 @@ function LineChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
               strokeWidth={2}
               dot={false}
               activeDot={{ r: 4 }}
+              isAnimationActive={false}
             />
           ))}
         </LineChart>
@@ -180,7 +181,7 @@ function LineChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
   }
 
   return (
-    <ResponsiveContainer width="100%" height={280}>
+    <ResponsiveContainer width="100%" height={height}>
       <LineChart data={rows} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
         <XAxis
@@ -207,13 +208,14 @@ function LineChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
           strokeWidth={2.5}
           dot={rows.length <= 20}
           activeDot={{ r: 4 }}
+          isAnimationActive={false}
         />
       </LineChart>
     </ResponsiveContainer>
   );
 }
 
-function BarChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
+function BarChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecision; height: number | `${number}%` }) {
   const { x, y, series } = chart;
   if (!x || !y) return null;
 
@@ -273,7 +275,7 @@ function BarChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
     if (isGrouped) {
       const { data, seriesKeys } = pivotBySeries(rows, x, y, series);
       return (
-        <ResponsiveContainer width="100%" height={280}>
+        <ResponsiveContainer width="100%" height={height}>
           <BarChart data={data} margin={{ top: 8, right: 12, left: rotateLabels ? 60 : 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
             <XAxis {...xAxisProps} />
@@ -281,7 +283,7 @@ function BarChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
             <Tooltip contentStyle={tooltipStyle} formatter={(v, name) => formatValue(v, String(name))} cursor={{ fill: "var(--color-accent-wash)" }} />
             <Legend wrapperStyle={{ fontSize: 12, color: "var(--color-ink-secondary)" }} />
             {seriesKeys.map((key, i) => (
-              <Bar key={key} dataKey={(row) => row[key]} fill={SERIES_COLORS[i % SERIES_COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={40} />
+              <Bar key={key} dataKey={(row) => row[key]} fill={SERIES_COLORS[i % SERIES_COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={40} isAnimationActive={false} />
             ))}
           </BarChart>
         </ResponsiveContainer>
@@ -293,28 +295,37 @@ function BarChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
     const seriesValues = Array.from(new Set(rows.map((r) => String(r[series]))));
     const colorFor = (v: string) => SERIES_COLORS[seriesValues.indexOf(v) % SERIES_COLORS.length];
     return (
-      <div>
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={rows} margin={{ top: 8, right: 12, left: rotateLabels ? 60 : 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
-            <XAxis {...xAxisProps} />
-            <YAxis {...yAxisProps} />
-            <Tooltip
-              contentStyle={tooltipStyle}
-              formatter={(v, name) => [formatValue(v, String(name)), String(name)]}
-              labelFormatter={(label, payload) =>
-                payload?.[0] ? `${label} — ${String(payload[0].payload[series])}` : label
-              }
-              cursor={{ fill: "var(--color-accent-wash)" }}
-            />
-            <Bar dataKey={(row) => row[y]} radius={[3, 3, 0, 0]} maxBarSize={32}>
-              {rows.map((row, i) => (
-                <Cell key={i} fill={colorFor(String(row[series]))} />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
-        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5">
+      // flex column with the chart as the ONLY flex-1 child: a plain block
+      // div's height is auto (indefinite), which breaks CSS percentage-
+      // height resolution for ResponsiveContainer's height="100%" (dashboard
+      // tiles) -- real bug, caught live: Recharts ended up with a literal
+      // `height: 0` container and rendered nothing, despite the legend
+      // below it working fine. A flex item's height IS definite after
+      // layout, so "100%" resolves correctly through it.
+      <div className="flex h-full flex-col">
+        <div className="min-h-0 flex-1">
+          <ResponsiveContainer width="100%" height={height}>
+            <BarChart data={rows} margin={{ top: 8, right: 12, left: rotateLabels ? 60 : 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
+              <XAxis {...xAxisProps} />
+              <YAxis {...yAxisProps} />
+              <Tooltip
+                contentStyle={tooltipStyle}
+                formatter={(v, name) => [formatValue(v, String(name)), String(name)]}
+                labelFormatter={(label, payload) =>
+                  payload?.[0] ? `${label} — ${String(payload[0].payload[series])}` : label
+                }
+                cursor={{ fill: "var(--color-accent-wash)" }}
+              />
+              <Bar dataKey={(row) => row[y]} radius={[3, 3, 0, 0]} maxBarSize={32} isAnimationActive={false}>
+                {rows.map((row, i) => (
+                  <Cell key={i} fill={colorFor(String(row[series]))} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="mt-3 shrink-0 flex flex-wrap gap-x-4 gap-y-1.5">
           {seriesValues.map((v) => (
             <span key={v} className="flex items-center gap-1.5 text-xs text-ink-secondary">
               <span className="h-2.5 w-2.5 rounded-sm" style={{ background: colorFor(v) }} />
@@ -327,13 +338,13 @@ function BarChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
   }
 
   return (
-    <ResponsiveContainer width="100%" height={280}>
+    <ResponsiveContainer width="100%" height={height}>
       <BarChart data={rows} margin={{ top: 8, right: 12, left: rotateLabels ? 60 : 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
         <XAxis {...xAxisProps} />
         <YAxis {...yAxisProps} />
         <Tooltip contentStyle={tooltipStyle} formatter={(v, name) => formatValue(v, String(name))} cursor={{ fill: "var(--color-accent-wash)" }} />
-        <Bar dataKey={(row) => row[y]} fill="var(--color-series-2)" radius={[3, 3, 0, 0]} maxBarSize={48} />
+        <Bar dataKey={(row) => row[y]} fill="var(--color-series-2)" radius={[3, 3, 0, 0]} maxBarSize={48} isAnimationActive={false} />
       </BarChart>
     </ResponsiveContainer>
   );
@@ -342,17 +353,19 @@ function BarChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
 const PIE_SLICE_CAP = 8; // matches SERIES_COLORS.length — beyond this a pie
 // is unreadable regardless of what was asked for, so fall back to a bar.
 
-function PieChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
+function PieChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecision; height: number | `${number}%` }) {
   const { x, y } = chart;
   if (!x || !y) return null;
 
   if (rows.length > PIE_SLICE_CAP) {
     return (
-      <div>
-        <p className="mb-2 text-xs text-ink-muted">
+      <div className="flex h-full flex-col">
+        <p className="mb-2 shrink-0 text-xs text-ink-muted">
           Too many slices for a readable pie ({rows.length}) — showing as a bar chart instead.
         </p>
-        <BarChartView rows={rows} chart={{ ...chart, chart_type: "bar" }} />
+        <div className="min-h-0 flex-1">
+          <BarChartView rows={rows} chart={{ ...chart, chart_type: "bar" }} height={height} />
+        </div>
       </div>
     );
   }
@@ -360,33 +373,39 @@ function PieChartView({ rows, chart }: { rows: Row[]; chart: ChartDecision }) {
   const total = rows.reduce((sum, row) => sum + (Number(row[y]) || 0), 0);
 
   return (
-    <div>
-      <ResponsiveContainer width="100%" height={280}>
-        <PieChart>
-          <Pie
-            data={rows}
-            dataKey={(row) => row[y]}
-            nameKey={(row) => row[x]}
-            innerRadius={56}
-            outerRadius={100}
-            paddingAngle={2}
-            stroke="var(--color-surface)"
-            strokeWidth={2}
-          >
-            {rows.map((_, i) => (
-              <Cell key={i} fill={SERIES_COLORS[i % SERIES_COLORS.length]} />
-            ))}
-          </Pie>
-          <Tooltip
-            contentStyle={tooltipStyle}
-            formatter={(v, _name, item) => {
-              const pct = total ? ((Number(v) / total) * 100).toFixed(1) : "0";
-              return [`${formatValue(v, y)} (${pct}%)`, String(item?.payload?.[x] ?? "")];
-            }}
-          />
-        </PieChart>
-      </ResponsiveContainer>
-      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5">
+    // See the matching comment on the bar chart's 1:1 branch above --
+    // ResponsiveContainer's height="100%" only resolves through a parent
+    // with a DEFINITE height, which a plain block div (height:auto) isn't.
+    <div className="flex h-full flex-col">
+      <div className="min-h-0 flex-1">
+        <ResponsiveContainer width="100%" height={height}>
+          <PieChart>
+            <Pie
+              data={rows}
+              dataKey={(row) => row[y]}
+              nameKey={(row) => row[x]}
+              innerRadius={56}
+              outerRadius={100}
+              paddingAngle={2}
+              stroke="var(--color-surface)"
+              strokeWidth={2}
+              isAnimationActive={false}
+            >
+              {rows.map((_, i) => (
+                <Cell key={i} fill={SERIES_COLORS[i % SERIES_COLORS.length]} />
+              ))}
+            </Pie>
+            <Tooltip
+              contentStyle={tooltipStyle}
+              formatter={(v, _name, item) => {
+                const pct = total ? ((Number(v) / total) * 100).toFixed(1) : "0";
+                return [`${formatValue(v, y)} (${pct}%)`, String(item?.payload?.[x] ?? "")];
+              }}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="mt-3 shrink-0 flex flex-wrap gap-x-4 gap-y-1.5">
         {rows.map((row, i) => (
           <span key={i} className="flex items-center gap-1.5 text-xs text-ink-secondary">
             <span className="h-2.5 w-2.5 rounded-sm" style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }} />
@@ -437,22 +456,35 @@ export function ChartRenderer({
   chart,
   rows,
   columns,
+  height = 280,
 }: {
   chart: ChartDecision;
   rows: Row[];
   columns: string[];
+  /** Defaults to the chat view's fixed 280px. Dashboard tiles pass "100%"
+   * so Recharts' own ResponsiveContainer resize-observes the flex parent
+   * directly via CSS -- a real bug, caught live: an earlier version
+   * measured the tile's content div with a SEPARATE ResizeObserver in JS
+   * and fed that pixel height back into this same chart, which is itself
+   * inside the observed div. That created a feedback loop (observed size
+   * depends on rendered content driven by the observed size) that
+   * corrupted Recharts' line/pie draw-in animation -- the DOM had valid
+   * paths with real geometry and opacity:1, but visually never finished
+   * drawing. Letting ResponsiveContainer own its own measurement removes
+   * the loop entirely. */
+  height?: number | `${number}%`;
 }) {
   if (chart.chart_type === "kpi" && chart.y) {
     return <KpiTile rows={rows} y={chart.y} />;
   }
   if (chart.chart_type === "line") {
-    return <LineChartView rows={rows} chart={chart} />;
+    return <LineChartView rows={rows} chart={chart} height={height} />;
   }
   if (chart.chart_type === "bar") {
-    return <BarChartView rows={rows} chart={chart} />;
+    return <BarChartView rows={rows} chart={chart} height={height} />;
   }
   if (chart.chart_type === "pie") {
-    return <PieChartView rows={rows} chart={chart} />;
+    return <PieChartView rows={rows} chart={chart} height={height} />;
   }
   return <TableView rows={rows} columns={columns} />;
 }

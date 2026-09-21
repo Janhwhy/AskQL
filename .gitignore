@@ -7,6 +7,9 @@ venv/
 # DuckDB file + raw archive — ship a seed script instead of the data itself
 data/askql.db
 data/askql.db.wal
+
+# Dashboard layout/metadata — user-created state, not shipped data
+data/dashboards.sqlite3
 data/raw/*
 !data/raw/.gitkeep
 data/backups/
@@ -15,3 +18,5 @@ data/archive/
 
 node_modules/
 .next/
+web/test-results/
+web/playwright-report/

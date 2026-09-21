@@ -4,6 +4,7 @@ import { AlertCircle } from "lucide-react";
 import type { Turn } from "@/lib/types";
 import { ChartRenderer } from "./ChartRenderer";
 import { ClarificationChips } from "./ClarificationChips";
+import { PinButton } from "./PinButton";
 import { SqlPanel } from "./SqlPanel";
 import { StageIndicator } from "./StageIndicator";
 
@@ -59,6 +60,16 @@ export function MessageTurn({
               {turn.chart && turn.rows && turn.columns && (
                 <div className="mt-2">
                   <ChartRenderer chart={turn.chart} rows={turn.rows} columns={turn.columns} />
+                </div>
+              )}
+              {turn.chart && turn.sql && (
+                <div className="mt-2 flex justify-end">
+                  <PinButton
+                    question={turn.question}
+                    sql={turn.sql}
+                    chart={turn.chart}
+                    narration={turn.narration}
+                  />
                 </div>
               )}
               {turn.sql && <SqlPanel sql={turn.sql} />}

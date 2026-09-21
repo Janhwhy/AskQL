@@ -100,6 +100,17 @@ def test_explicit_table_request_overrides_everything():
     assert result == {"chart_type": "table", "x": None, "y": None, "series": None}
 
 
+def test_bare_word_table_request_is_recognized():
+    """Real bug, caught live: "table of top 10 products" got a bar chart --
+    the old regex only matched fixed phrases ("as a table", "table view")
+    and never the bare word "table" by itself, unlike every other chart
+    type's pattern (pie/line/bar all match on their single keyword)."""
+    rows = [("Widget", 100.0), ("Gadget", 80.0)]
+    for phrasing in ["table of top 10 products", "give me a table", "top products table"]:
+        result = decide_chart(["product", "revenue"], rows, question=phrasing)
+        assert result["chart_type"] == "table", phrasing
+
+
 def test_pie_request_falls_back_when_shape_cant_support_it():
     """A single total has no categories to slice -- "pie chart of total
     revenue" should degrade to kpi, not force a meaningless one-slice pie."""

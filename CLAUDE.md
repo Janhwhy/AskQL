@@ -393,8 +393,305 @@ with actual DOM measurements (`getBoundingClientRect`, computed styles),
 not layout-math estimation — every wrong theory here was plausible and
 every one was falsified by 30 seconds of real measurement.
 
+**Narration hallucinated a wrong "highest" claim — caught from a live
+screenshot, not proactive testing.** Asked for "pie chart for sales
+revenue by products" (24 rows), the narration confidently stated one
+product ($602K) was highest — the real highest was a different product at
+$2.69M, 4.5x more, not even close, not a rounding error. Root cause: the
+narration LLM was handed a JSON blob of up to 20 rows and asked to eyeball
+the max itself — exactly the kind of factual computation this project's
+own philosophy already said shouldn't be delegated to LLM judgment when a
+deterministic answer exists (same reasoning as `decide_chart` and
+`_resolve_clarification` — chosen ad hoc each time a real failure exposed
+it, not decided up front). Fixed with `_compute_extremes()`
+(`agent/graph.py`): computes the true highest/lowest over the FULL result
+set (not just the 20 shown) using the chart's own `y` column, and hands
+the LLM a "Pre-computed, verified" fact block instead of the search
+problem. Verifying the fix immediately surfaced a second, related
+hallucination: even fed the correct top fact, the model added an
+unverified extra claim ("followed closely by [product]" — checked against
+the DB, that product was actually **9th** of 24, not 2nd, not close).
+Tightened the prompt to explicitly forbid ranking any row beyond the
+pre-computed ones. Confirmed correct and stable across 3 repeated live
+runs after the second fix — the general lesson repeats from the axis-label
+bug above: verify the fix actually holds, don't stop at the first
+plausible-looking success.
+
+**Chart-type follow-ups** ("now give it as a table" after "pie chart for
+top 5 products by sales") reuse the prior turn's SQL/rows instead of
+re-querying — `_is_chart_followup()` (`agent/graph.py`) matches a message
+that's ONLY a chart-type request via a narrow, anchored regex; anything
+with real extra content falls through and is treated as a fresh question,
+so a phrasing it doesn't recognize just costs a normal query, it never
+answers wrong. On a match, `ask`/`ask_stream` pull the checkpointed prior
+turn (same `thread_id` mechanism the ambiguity node already uses),
+re-run `decide_chart` on the SAME rows with the new question text, and
+reuse the narration as-is (the underlying fact didn't change, only the
+view of it did) — no new LLM call, no new DB query, and no risk of the
+regenerated SQL silently drifting from the original result. The
+checkpointed state is never mutated by this path, so a second follow-up
+("now pie again") still reuses the ORIGINAL full-query turn's data, not
+a stale intermediate one. Verified live end to end in the browser; also
+unit-tested (`test_is_chart_followup_*`, `test_chart_followup_reuses_prior_turn_without_requerying`
+in `tests/test_agent_graph.py`) — including a caught real gap ("now pie
+again" didn't match the first version of the regex, missing "again" from
+the trailing-word list).
+
+**Continuation questions ("now the same for 7 days") — caught from a live
+screenshot, a hard SQL error, not proactive testing.** Asking "Show me
+daily revenue for the last 14 days" then "now the same for 7 days" on the
+same thread produced `Binder Error: Referenced column "units_sold" not
+found in FROM clause!` — the follow-up isn't a chart-type-only phrasing
+(doesn't match `_is_chart_followup()`), so it fell through to a cold,
+context-free fresh question with no idea what "the same" referred to, and
+the LLM picked an essentially unrelated metric. Two root causes, both
+fixed in `agent/graph.py`:
+1. Zero conversational memory outside the narrow chart-followup path.
+   Fixed by adding `prior_question`/`prior_sql` to `AgentState` (must be
+   declared on the TypedDict — same LangGraph `invoke()`-schema-filtering
+   lesson as `clarification_answer` earlier — or the fields are silently
+   dropped) and a new `_recent_context_block()` that, whenever a prior
+   successful turn exists on the thread, injects the previous question and
+   its SQL into `GENERATE_PROMPT` with an explicit instruction: if the
+   current question is a continuation ("the same", "that but...", "again",
+   or just one changed parameter), keep the SAME metric and shape, change
+   only what's explicit; if it's clearly unrelated, ignore the block
+   entirely. A worked example was added to the prompt for the "change one
+   parameter" case specifically.
+2. A separate, adjacent bug this surfaced: the LLM wrote `SUM(units_sold)`
+   — `units_sold` is a metric *name*, not a real column (the actual
+   `sales` columns are `customer_id`, `amount`, `product_id`, `sale_id`,
+   `quantity`; the metric's SQL `expression` is `SUM(quantity)`).
+   Tightened `GENERATE_PROMPT`'s rule 1 to explicitly say the metric name
+   is never a real column and the SQL must use exactly what's in that
+   metric's `expression` field.
+
+Fixing this also surfaced a smaller, related bug in the same code path:
+the fresh-question branches of `ask`/`ask_stream` were hardcoding
+`clarifications: {}` on every non-clarification, non-chart-followup turn,
+silently breaking this file's own claim (see "Agent graph" above) that a
+clarification answer is remembered "for the session," not just for the
+immediate next turn. Fixed by carrying forward the checkpointed prior
+turn's `clarifications` dict instead of resetting it.
+
+Verified live end to end: turn 1 SQL
+`SELECT date, SUM(sales.amount) FROM sales WHERE date >= DATE '2026-09-21'
+- INTERVAL 14 DAY GROUP BY date`; turn 2 ("now the same for 7 days") SQL
+`SELECT date, SUM(sales.amount) FROM sales WHERE date >= DATE '2026-09-21'
+- INTERVAL 7 DAY GROUP BY date` — confirmed via direct `curl` to `/chat`
+that only the `INTERVAL` value changed, the metric stayed identical. Also
+confirmed visually via a Playwright screenshot showing a correctly-shaped
+7-day revenue line chart. Unit-tested
+(`test_continuation_question_gets_prior_turn_as_context` in
+`tests/test_agent_graph.py`) — asserts the turn-2 prompt contains both the
+prior question text and a fragment of the prior SQL, and that the
+returned SQL stays on `sales.amount` with only the interval changed. All
+43 tests pass.
+
 ### Phase 6 — polish
-Langfuse tracing, caching, proactive anomaly detection, README.
+
+**Golden eval harness (`agent/eval.py`), added out of order — before
+Langfuse/caching/anomaly detection below.** Every bug in Phases 3-5 above
+was found the same way: a human eyeballing a live screenshot AFTER the
+bug shipped, one at a time. `tests/test_agent_graph.py` mocks
+`generate()`, so it only proves the LangGraph wiring is correct — retries,
+routing, checkpointing — never that the LLM actually writes the right SQL
+for a given English question. That gap is why real regressions (the
+metric-name/expression confusion, the missing continuation context) kept
+reaching a live screenshot before being caught.
+
+`agent/eval.py` closes it: ~20 realistic scenarios (single-metric
+questions, date-range math, grouped breakdowns, both ambiguity cases,
+the out-of-scope refusal, explicit chart-type requests, the
+metric-name-vs-`expression` trap, the "now the same for 7 days"
+continuation case, and the chart-type-follow-up reuse case) run against
+the REAL `ask()` — real LLM calls, real DuckDB queries, nothing mocked —
+with structural assertions (SQL must/must-not contain certain substrings,
+correct chart type, correct refusal/ambiguity behavior, a follow-up's SQL
+byte-identical to its prior turn where that's expected) instead of a
+human reading JSON. Deliberately loose on exact SQL wording — an LLM's
+phrasing varies run to run — so it catches a wrong metric, wrong table,
+wrong date range, or wrong chart type, not cosmetic SQL differences.
+Run with `python -m agent.eval`; exits 1 if any case fails, usable as a
+(slow, real-API-cost) gate, not just an interactive check.
+
+First real run: 19/20 passed; the one failure was a bug in the EVAL's own
+assertion, not the agent — it demanded the literal column `opened_at`
+appear in the SQL for "tickets opened" with no date range asked, but
+rule 2 (an unrequested date filter must be omitted) correctly means that
+column never appears when nothing filters on it. `support_tickets_opened`
+has no base filter at all (unlike its siblings — `_resolved` and
+`_backlog` both filter on `status`, `avg_resolution_time` uses
+`date_diff`), so the correct proof it resolved to "opened" specifically
+is the ABSENCE of those siblings' distinguishing SQL, not the presence of
+a column nothing was filtering on. Fixed the assertion, not the agent;
+re-ran that case alone and confirmed the metric resolution itself was
+always correct. Also incidentally confirmed the whole run held up
+end-to-end running entirely on the Ollama fallback (Gemini's 20/day free
+quota was already exhausted for every single call) — real evidence the
+fallback path in `agent/llm.py` behaves correctly under actual load, not
+just in isolation.
+
+Langfuse tracing, caching, proactive anomaly detection, README — still open.
+
+### Phase 7 — dashboards (done)
+
+User-requested: every answer up to this point was a one-off chat turn: no
+way to save a chart or build a persistent multi-chart view, the thing a
+real analytics tool (PowerBI/Tableau) is expected to do.
+
+**Backend** (`api/dashboards_db.py` + `api/dashboards.py`, mounted in
+`api/main.py`): dashboards and their pinned items live in a **separate
+SQLite file** (`data/dashboards.sqlite3`), not a table inside
+`data/askql.db`. This is the load-bearing architectural call, not
+incidental — constraint 1 (DuckDB single writer, never contending with the
+daily poll job) would otherwise mean every "pin a chart" click needs a write
+connection to the same analytical file the poll job also writes to.
+Dashboard/layout metadata is small and user-driven, so keeping it in its
+own SQLite file (stdlib `sqlite3`, same "no ORM for two small tables"
+reasoning as DuckDB's own `duckdb` API usage) sidesteps the constraint
+entirely instead of working around it. A pinned item stores only
+`question`/`sql`/chart-shape/`narration` — never a data snapshot;
+`GET /dashboards/{id}` re-runs each item's stored SQL against the live,
+read-only DuckDB connection on every load, so a dashboard reflects today's
+numbers, not the numbers at pin time. Every piece of SQL that reaches this
+router — freshly pinned OR re-run from storage — goes back through
+`validate_select_only` before it ever executes; constraint 3 doesn't carve
+out an exception for SQL the agent already validated once, since a stored
+item's SQL is untrusted input again the moment it's read back.
+
+**Frontend**: `PinButton` (`web/components/chat/PinButton.tsx`) on any
+chat answer with a chart — pick an existing dashboard or create one inline.
+`/dashboards` lists them; `/dashboards/[id]` renders a `react-grid-layout`
+grid (`DashboardGrid`/`DashboardTile`) — drag to rearrange, resize per
+tile, remove a tile, layout persists via `PUT /dashboards/{id}/layout`
+(optimistic locally, fire-and-forget to the backend — a failed layout save
+is low-stakes, worst case a rearrange is lost on next load, not worth
+interrupting the user over).
+
+**Two real bugs found live, not proactively** (both root-caused via direct
+DOM/computed-style inspection, not guessed at from screenshots alone):
+
+- **A ResizeObserver feedback loop silently corrupted every chart inside a
+  dashboard tile.** The first version measured the tile's own content div
+  with a JS `ResizeObserver` and fed that pixel height back into the chart
+  rendered INSIDE that same div — a feedback loop (observed size depends on
+  content that is itself sized by the observed value). The rendered SVG
+  paths had completely valid geometry, real colors, `opacity: 1` — by every
+  DOM inspection they should have been visible — yet nothing drew. Root
+  cause confirmed via `getComputedStyle`: the line's `stroke-dasharray` was
+  stuck at a mismatched two-value state (`"550.857px, 600.907px"`) instead
+  of either its start state or its finished state, consistent with the
+  chart's entrance animation restarting mid-flight every time the observer
+  fired. Fixed by removing the custom observer entirely and passing
+  Recharts' own `ResponsiveContainer` a CSS percentage (`height="100%"`)
+  instead of a JS-measured pixel value, letting Recharts own its own
+  resize-observation against the flex-sized parent — the way the library
+  is actually designed to be used.
+- **A second, independent bug surfaced by the same fix**: `height="100%"`
+  only resolves through ancestors with a DEFINITE height. The pie chart's
+  and the "1:1-series" bar chart's wrapper markup was a plain `<div>` (for
+  the manual legend below the chart) — a plain block div's height is
+  `auto`, which breaks the percentage chain. Confirmed via direct
+  measurement: Recharts' own `.recharts-responsive-container` ended up
+  with a literal computed `height: 0`, so the pie legitimately had zero
+  pixels to draw into (0 sectors in the DOM), while the line chart (no
+  wrapping div) was unaffected by this specific issue. Fixed by making
+  each wrapper a `flex h-full flex-col` with the chart itself in a
+  `min-h-0 flex-1` child — a flex item's height IS definite after layout,
+  so the percentage resolves correctly through it, in both the dashboard
+  tile (`height="100%"`) and chat (`height={280}`) cases. Also disabled
+  `isAnimationActive` on every `Line`/`Bar`/`Pie` — the draw-in animation
+  has no reason to survive a container that can legitimately resize right
+  after mount (exactly what a grid tile does), and it's what got corrupted
+  by the first bug in the first place.
+
+Verified: backend CRUD + live re-run + SQL-rejection-on-pin round-tripped
+via `TestClient` (create dashboard, pin a chart, reject a `DELETE FROM
+sales` pin attempt with 400, fetch with live data, update layout, remove
+item, delete dashboard, confirm 404 after). Frontend verified live in the
+browser end to end: asked two real questions (a line chart, a pie chart),
+pinned both to a new dashboard, confirmed the grid renders both fully
+(not just axes/legends — the actual line stroke and pie wedges), dragged a
+tile to rearrange, confirmed the new layout survives a full page reload.
+`npx tsc --noEmit` and `npm run lint` clean; all 43 pytest tests still
+pass.
+
+**Two more real bugs, reported live right after shipping Phase 7 — not
+proactively found:**
+
+- **"Table of top 10 products" rendered as a bar chart.** `decide_chart`'s
+  explicit-request regex for every OTHER chart type matches its bare
+  keyword (`\bpie\b`, `\bbar\s*(chart|graph)\b`, etc.), but the table
+  pattern only matched fixed phrases — `"as a table"`, `"table view"`,
+  `"in a table"`, `"raw table"` — and never the bare word `"table"` by
+  itself. "Table of top 10 products" doesn't contain any of those phrases,
+  so it silently fell through to shape-based inference, which picked `bar`
+  for a categorical+numeric result — the same class of bug (`decide_chart`
+  never reading the question) already fixed once for pie in Phase 5, just
+  missed for table specifically. Fixed
+  (`agent/chart.py`'s `_CHART_TYPE_PATTERNS`) by matching the bare word
+  `table` (plus `raw data`/`raw rows`, which don't contain the word
+  "table" and still need their own alternatives). Regression test added
+  (`test_bare_word_table_request_is_recognized` in `tests/test_chart.py`)
+  covering "table of...", "give me a table", and "...table" as a trailing
+  word — all 44 pytest tests pass. Verified live via a direct `/chat`
+  call: `chart_type: "table"` for the exact reported phrasing.
+- **Dashboard tiles were only draggable from a ~20px title sliver.** The
+  chart body itself carried a `no-drag` class (added alongside the
+  ResizeObserver fix above, for an unrelated reason — to stop
+  `react-grid-layout` from treating an in-chart interaction as a drag
+  start) — the actual effect was that dragging from where a user
+  naturally tries first (the chart itself) did nothing, so the feature
+  read as broken even though the plumbing (`onLayoutChange` ->
+  `PUT .../layout`) always worked. Fixed by making the WHOLE tile a drag
+  surface (`cursor-grab`/`active:cursor-grabbing` on the card) and scoping
+  `no-drag` down to just the remove button — a table tile's own internal
+  scroll is unaffected since mouse-wheel scrolling doesn't trigger
+  `react-draggable`'s mousedown-based drag start. Verified live: dragged a
+  tile by clicking directly on a table ROW (not the header) and confirmed
+  it moved and the new position survived a reload.
+
+**The actual fix, called out explicitly: real end-to-end browser test
+coverage for the frontend (`web/e2e/dashboard.spec.ts`, Playwright).**
+Every bug in this Phase 7 section — the ResizeObserver feedback loop, the
+percentage-height chain, the table-vs-bar regex gap, the 20px drag
+sliver — was found by a human clicking around a live browser, never by
+anything that runs automatically. `agent/eval.py` (Phase 6) closed that
+gap for the agent's SQL/chart-type-decision logic; it has no way to catch
+a chart that decided the right type but renders empty, or a drag
+interaction that silently does nothing, because those aren't agent bugs,
+they're frontend rendering/interaction bugs. Added `@playwright/test` +
+`web/playwright.config.ts` + `web/e2e/dashboard.spec.ts` as the frontend
+counterpart: real assertions against real DOM state in a real browser
+(`npm run test:e2e`, requires both dev servers already running). Two
+tests: one pins the exact "table of X" phrasing from the bug above and
+asserts an actual `<table>` renders (not `.recharts-wrapper`); the other
+pins a chart, asserts its SVG path has both a non-trivial `d` attribute
+AND a non-trivial rendered bounding-box width (checking `d` length alone
+would NOT have caught the ResizeObserver bug — that bug's broken state
+still had a plausible-looking `d` string), then drags a tile by clicking
+a point inside its BODY (not the header) and asserts the position changed
+and survives a reload.
+
+Immediately caught a real bug in the TEST ITSELF, not the app — worth
+recording since it's the same discipline this file keeps asking for:
+verify the fix actually holds, don't stop at the first result. First run:
+the drag assertion failed (`afterStyle === beforeStyle`, no change at
+all). Before concluding the drag was broken, checked what was actually
+happening with `document.elementFromPoint` at the computed drag-start
+coordinate — it returned `null`. The default Playwright viewport
+(1280×720) was smaller than the dashboard tile being dragged (which
+extended to y≈863), so the drag's start point was below the fold,
+entirely outside the viewport — `mouse.move`/`mouse.down` at an
+off-viewport coordinate hits nothing, so no drag ever started. Not an app
+bug: confirmed by re-running the identical drag against a live dashboard
+with a larger viewport (1600×1200) via a throwaway debug script — same
+coordinates-relative-to-tile, drag registered immediately
+(`.react-grid-placeholder` appeared, position changed). Fixed the TEST
+(bigger `viewport` in `playwright.config.ts`, `scrollIntoViewIfNeeded()`
+before computing drag coordinates) rather than the app. Both tests pass
+after the fix.
 
 ---
 
@@ -431,6 +728,11 @@ askql/
 - `data/askql.db` is gitignored; ship a seed script instead
 - Tests for the validation layer and metric loading at minimum — the agent nodes are
   harder to test, but SQL validation must be covered
+- Any change to chart rendering, dashboard grid/drag, or the pin flow needs a
+  `web/e2e/*.spec.ts` case (`npm run test:e2e`, real browser, real DOM
+  assertions) — every one of Phase 7's bugs was a frontend rendering/interaction
+  bug that `agent/eval.py` structurally cannot see, since it never touches a
+  browser
 
 ---
 

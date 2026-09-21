@@ -22,6 +22,8 @@ from pydantic import BaseModel
 from agent.graph import ask_stream
 from ingestion import db
 
+from .dashboards import router as dashboards_router
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
@@ -42,6 +44,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(dashboards_router)
 
 
 @app.get("/health")

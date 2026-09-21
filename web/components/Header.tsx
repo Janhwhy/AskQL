@@ -1,3 +1,5 @@
+import { LayoutGrid, MessageSquare } from "lucide-react";
+import Link from "next/link";
 import { ThemeToggle } from "./ThemeToggle";
 
 export function Header() {
@@ -11,7 +13,25 @@ export function Header() {
           governed answers, in plain English
         </span>
       </div>
-      <ThemeToggle />
+      <nav className="flex items-center gap-1">
+        <Link
+          href="/"
+          className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm text-ink-secondary transition-colors hover:bg-surface-raised hover:text-ink-primary"
+        >
+          <MessageSquare size={14} />
+          <span className="hidden sm:inline">Chat</span>
+        </Link>
+        <Link
+          href="/dashboards"
+          className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm text-ink-secondary transition-colors hover:bg-surface-raised hover:text-ink-primary"
+        >
+          <LayoutGrid size={14} />
+          <span className="hidden sm:inline">Dashboards</span>
+        </Link>
+        <div className="ml-1.5">
+          <ThemeToggle />
+        </div>
+      </nav>
     </header>
   );
 }

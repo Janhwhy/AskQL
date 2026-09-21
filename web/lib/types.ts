@@ -43,6 +43,43 @@ export interface ChatRequest {
   clarification_answer: string | null;
 }
 
+// Mirrors api/dashboards.py's response shapes.
+export interface DashboardSummary {
+  id: string;
+  name: string;
+  created_at: string;
+  item_count: number;
+}
+
+export interface DashboardItemLayout {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+// A dashboard item is "live" -- rows/columns are re-queried by the backend
+// on every GET, not a stored snapshot, so a stale metric definition shows up
+// as `error` on that one tile rather than breaking the whole dashboard.
+export interface DashboardItem {
+  id: string;
+  question: string;
+  sql: string;
+  chart: ChartDecision;
+  narration: string | null;
+  layout: DashboardItemLayout;
+  columns: string[] | null;
+  rows: Row[] | null;
+  error: string | null;
+}
+
+export interface Dashboard {
+  id: string;
+  name: string;
+  created_at: string;
+  items: DashboardItem[];
+}
+
 // One turn in the conversation, built up client-side from a stream of
 // ChatEvents. "streaming" while events are still arriving for this turn.
 export interface Turn {

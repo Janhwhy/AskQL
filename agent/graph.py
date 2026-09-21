@@ -36,6 +36,24 @@ NO_METRIC_SENTINEL = "NO_METRIC:"
 AMBIGUOUS_SENTINEL = "AMBIGUOUS:"
 MAX_RETRIES = 1
 
+# Matches a message that's ONLY a chart-type request ("now give it as a
+# table", "show as bar chart", "table") with nothing else in it. Anchored
+# both ends, so anything with real extra content ("revenue by region as a
+# table") fails to match and falls through to a normal fresh question --
+# the reuse path below only ever fires on a genuine narrow match, never a
+# guess, so a phrasing this doesn't recognize just costs a normal query,
+# it never answers wrong.
+_CHART_FOLLOWUP_PATTERN = re.compile(
+    r"^\s*(now\s+)?(please\s+)?(give|show|display|make|turn|convert|switch|change)?\s*"
+    r"(it|that|this|me)?\s*(as|into|to|in)?\s*(a\s+|an\s+|the\s+)?"
+    r"(pie|bar|line|table|kpi)\s*(chart|graph|view)?\s*(instead|please|now|again)?\s*\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_chart_followup(question: Optional[str]) -> bool:
+    return bool(question) and bool(_CHART_FOLLOWUP_PATTERN.match(question.strip()))
+
 GENERATE_PROMPT = """You are a SQL generator for a business analytics tool. Output must run on DuckDB.
 
 You may ONLY use the metrics defined below — never invent a table, column, join, or
@@ -44,11 +62,16 @@ filter that isn't listed here, even if you've seen it on a DIFFERENT metric.
 {context}
 
 {clarifications}
-
+{recent_context}
 Rules:
 1. Pick exactly ONE metric. Use its `source`, `join`, `expression`, and base filter
    EXACTLY as listed — do not add, remove, or combine anything from another metric.
    If a metric has no `join` listed, do not reference any table other than its `source`.
+   The text right after "- " (e.g. "units_sold") is the metric's NAME — it exists so
+   YOU can pick the right metric, it is NEVER a real column and must NEVER appear in
+   the SQL you output. The SQL must use exactly what's in that metric's `expression`
+   field (e.g. `quantity`, not `units_sold`) — a metric named units_sold whose
+   expression is `quantity` means `SUM(quantity)`, never `SUM(units_sold)`.
 2. A date range condition on the metric's `time_column` is OPTIONAL, even when
    `grain: day` — that field only means a `time_column` EXISTS to filter on if the
    question asks for one. "How many X in total" / "of all time" / no time mentioned
@@ -99,6 +122,13 @@ Example (ambiguous — same pattern, a different vague phrasing):
 Q: "Tell me about our customers."
 {ambiguous_sentinel} Do you want new signups, churn, active customer count, or revenue by customer segment? | new_customers, churned_customers, active_customers, revenue
 
+Example (continuation of the PREVIOUS question — see "Previous question" section
+above when present; keep the SAME metric, only change what's explicitly different):
+Previous question: "Show me daily revenue for the last 14 days"
+Previous SQL: SELECT date, SUM(sales.amount) FROM sales WHERE date >= DATE '{today}' - INTERVAL 14 DAY GROUP BY date
+Q: "now the same for 7 days"
+SELECT date, SUM(sales.amount) FROM sales WHERE date >= DATE '{today}' - INTERVAL 7 DAY GROUP BY date
+
 Question: {question}
 SQL:"""
 
@@ -145,9 +175,16 @@ NARRATE_PROMPT = """Question: {question}
 SQL used: {sql}
 Result columns: {columns}
 Result rows (first 20): {rows}
-
+{extremes_block}
 Write exactly ONE sentence of plain-English insight a business user would care about.
-Reference at least one actual number from the results. No preamble, no markdown."""
+Reference at least one actual number from the results. If a "Pre-computed" block is
+given above, use those figures directly for any highest/lowest claim — do not scan the
+rows yourself and recompute them, you will get it wrong on a result this size, and a
+wrong highest/lowest claim is worse than a boring but correct one. Do not name or rank
+any OTHER row for comparison ("followed by...", "close behind...", second place, etc.)
+— only the pre-computed figures above are verified; anything else you'd say about
+relative ranking is a guess from a partial, unsorted view and will likely be wrong, as
+it already has been. State the one verified fact and stop. No preamble, no markdown."""
 
 
 class AgentState(TypedDict):
@@ -162,6 +199,8 @@ class AgentState(TypedDict):
     pending_clarification: Optional[dict]
     clarifications: dict[str, str]
     clarification_answer: Optional[str]
+    prior_question: Optional[str]
+    prior_sql: Optional[str]
 
 
 def _strip_code_fence(text: str) -> str:
@@ -206,6 +245,30 @@ def _resolve_clarification(answer: str, candidates: list[str], metrics: dict) ->
     return best
 
 
+def _recent_context_block(prior_question: Optional[str], prior_sql: Optional[str]) -> str:
+    """Real bug, caught live: "now the same for 7 days" after "daily
+    revenue for the last 14 days" got answered with a different metric
+    entirely (units_sold instead of revenue) — the agent had zero memory
+    of what "the same" referred to for anything except the narrow
+    chart-type-only follow-up path, so a question that only makes sense as
+    a continuation got treated as a cold, context-free fresh question.
+    Populated by `ask`/`ask_stream` from the checkpointed prior turn
+    whenever one exists on this thread; empty string (no block at all)
+    when there isn't one, so a genuinely fresh conversation is unaffected.
+    """
+    if not prior_question or not prior_sql:
+        return ""
+    return (
+        f'Previous question in this conversation: "{prior_question}"\n'
+        f"Previous SQL: {prior_sql}\n"
+        f'If the current question refers back to this ("the same", "that but...", '
+        f'"again", or just changes one parameter like a date range without naming a '
+        f"new metric), keep the SAME metric and shape as the previous SQL, changing "
+        f"ONLY what's explicitly different. If the current question is clearly about "
+        f"something else, ignore this block entirely.\n"
+    )
+
+
 def generate_sql(state: AgentState) -> AgentState:
     metrics = load_metrics()
 
@@ -240,6 +303,7 @@ def generate_sql(state: AgentState) -> AgentState:
     prompt = GENERATE_PROMPT.format(
         context=context,
         clarifications=clarifications_block(clarifications),
+        recent_context=_recent_context_block(state.get("prior_question"), state.get("prior_sql")),
         question=state["question"],
         no_metric_sentinel=NO_METRIC_SENTINEL,
         ambiguous_sentinel=AMBIGUOUS_SENTINEL,
@@ -317,14 +381,61 @@ def decide_chart_node(state: AgentState) -> AgentState:
     return {**state, "chart": chart}
 
 
+def _compute_extremes(columns: list, rows: list, chart: Optional[ChartDecision]) -> Optional[dict]:
+    """Finds the actual highest/lowest row by the chart's own y column,
+    over the FULL result set (not just the 20 rows shown to the prompt).
+
+    Real bug, caught from a live screenshot: asked to eyeball "the
+    highest" across a 24-row JSON blob, the narration LLM picked a wrong
+    row entirely (claimed a product with $602K was highest when another
+    had $2.69M — not a rounding error, not close, just wrong). Scanning a
+    result set for an extremum is exactly the kind of factual computation
+    this project's own philosophy says shouldn't be left to LLM judgment
+    when a deterministic answer exists (same reasoning as chart.py's
+    decide_chart and graph.py's _resolve_clarification) — so compute it
+    here and hand the LLM the fact instead of the search problem.
+    """
+    if not chart or not chart.get("y") or len(rows) < 2:
+        return None
+    y, x = chart["y"], chart.get("x")
+    try:
+        y_idx = columns.index(y)
+    except ValueError:
+        return None
+    x_idx = columns.index(x) if x and x in columns else None
+
+    numeric_rows = [
+        (r[x_idx] if x_idx is not None else None, r[y_idx])
+        for r in rows
+        if isinstance(r[y_idx], (int, float))
+    ]
+    if not numeric_rows:
+        return None
+
+    top = max(numeric_rows, key=lambda r: r[1])
+    bottom = min(numeric_rows, key=lambda r: r[1])
+    return {"y": y, "x": x, "top": top, "bottom": bottom, "n": len(numeric_rows)}
+
+
 def narrate(state: AgentState) -> AgentState:
     import json
+
+    extremes = _compute_extremes(state["columns"], state["rows"], state.get("chart"))
+    extremes_block = ""
+    if extremes:
+        label = f" ({extremes['x']})" if extremes["x"] else ""
+        extremes_block = (
+            f"\nPre-computed, verified against all {extremes['n']} rows (not just the ones shown above):\n"
+            f"- highest {extremes['y']}{label}: {extremes['top'][0]!r} = {extremes['top'][1]}\n"
+            f"- lowest {extremes['y']}{label}: {extremes['bottom'][0]!r} = {extremes['bottom'][1]}\n"
+        )
 
     prompt = NARRATE_PROMPT.format(
         question=state["question"],
         sql=state["sql"],
         columns=state["columns"],
         rows=json.dumps(state["rows"][:20], default=_default_json),
+        extremes_block=extremes_block,
     )
     text = generate(prompt).strip()
     return {**state, "narration": text}
@@ -387,15 +498,40 @@ def ask(question: str, thread_id: Optional[str] = None, clarification_answer: Op
       recorded on this thread's last turn, then re-asks the *original*
       question (retrieved from checkpointed state, `question` arg is ignored
       in this case).
+    - `question` is ONLY a chart-type change ("now give it as a table") and
+      a prior turn's data exists on this thread: reuses that turn's SQL/rows
+      instead of re-querying — see `_is_chart_followup`.
     """
     app = _graph()
     config = {"configurable": {"thread_id": thread_id or "__stateless__"}}
+
+    if clarification_answer is None and thread_id is not None and _is_chart_followup(question):
+        prior = app.get_state(config).values
+        if prior and prior.get("rows") is not None and prior.get("columns"):
+            new_chart = decide_chart(prior["columns"], prior["rows"], question=question)
+            return {
+                "question": question,
+                "sql": prior["sql"],
+                "columns": prior["columns"],
+                "rows": [dict(zip(prior["columns"], r)) for r in prior["rows"]],
+                "chart": new_chart,
+                "narration": prior.get("narration"),
+                "retries": prior.get("retries", 0),
+            }
 
     if clarification_answer is not None and thread_id is not None:
         prior = app.get_state(config).values
         question = prior.get("question", question)
         state_in = {**prior, "question": question, "clarification_answer": clarification_answer}
     else:
+        # Real bug, fixed alongside the "recent context" fix below:
+        # `clarifications` used to be hardcoded to {} on every fresh
+        # question, silently discarding earlier-resolved ambiguities within
+        # the SAME thread even though CLAUDE.md's own differentiator claim
+        # is that the ambiguity node "remembers the answer for the
+        # session" — it only actually remembered within one clarification
+        # round-trip, not across separate questions after it.
+        prior = app.get_state(config).values if thread_id is not None else None
         state_in = {
             "question": question,
             "sql": None,
@@ -406,8 +542,10 @@ def ask(question: str, thread_id: Optional[str] = None, clarification_answer: Op
             "chart": None,
             "narration": None,
             "pending_clarification": None,
-            "clarifications": {},
+            "clarifications": dict(prior.get("clarifications") or {}) if prior else {},
             "clarification_answer": None,
+            "prior_question": prior.get("question") if prior and prior.get("rows") is not None else None,
+            "prior_sql": prior.get("sql") if prior and prior.get("rows") is not None else None,
         }
 
     result = app.invoke(state_in, config=config)
@@ -442,15 +580,54 @@ def ask_stream(question: Optional[str], thread_id: Optional[str] = None, clarifi
 
     Every yielded dict has a "stage" key. The stream always ends with
     exactly one of: "clarification", "error", or "done".
+
+    Also handles a chart-type-only follow-up ("now give it as a table") on
+    an existing thread by reusing the prior turn's SQL/rows/narration
+    instead of re-querying — see `_is_chart_followup`. Cheaper (no LLM call,
+    no DB query) and more correct: regenerating SQL from scratch for "as a
+    table" risks the new query silently drifting from "top 5 products by
+    sales" instead of just re-displaying the same answer differently. The
+    checkpointed state is never mutated by this path, so a second follow-up
+    ("now pie again") still reuses the ORIGINAL full-query turn's data, not
+    a stale intermediate one.
     """
     app = _graph()
     config = {"configurable": {"thread_id": thread_id or "__stateless__"}}
+
+    if clarification_answer is None and thread_id is not None and _is_chart_followup(question):
+        prior = app.get_state(config).values
+        if prior and prior.get("rows") is not None and prior.get("columns"):
+            new_chart = decide_chart(prior["columns"], prior["rows"], question=question)
+            row_dicts = [dict(zip(prior["columns"], r)) for r in prior["rows"]]
+            yield {"stage": "thinking"}
+            yield {"stage": "sql", "sql": prior["sql"]}
+            yield {"stage": "result", "columns": prior["columns"], "rows": row_dicts}
+            yield {"stage": "chart", "chart": new_chart}
+            if prior.get("narration"):
+                yield {"stage": "narration", "narration": prior["narration"]}
+            yield {
+                "stage": "done",
+                "question": question,
+                "sql": prior["sql"],
+                "columns": prior["columns"],
+                "rows": row_dicts,
+                "chart": new_chart,
+                "narration": prior.get("narration"),
+            }
+            return
 
     if clarification_answer is not None and thread_id is not None:
         prior = app.get_state(config).values
         question = prior.get("question", question)
         state_in = {**prior, "question": question, "clarification_answer": clarification_answer}
     else:
+        # See the matching comment in ask() — carries forward
+        # clarifications (previously wiped every fresh question, despite
+        # the "remembers for the session" claim) and prior_question/
+        # prior_sql so generate_sql can correctly treat a continuation
+        # like "now the same for 7 days" as one, instead of a cold,
+        # context-free fresh question that picks an unrelated metric.
+        prior = app.get_state(config).values if thread_id is not None else None
         state_in = {
             "question": question,
             "sql": None,
@@ -461,8 +638,10 @@ def ask_stream(question: Optional[str], thread_id: Optional[str] = None, clarifi
             "chart": None,
             "narration": None,
             "pending_clarification": None,
-            "clarifications": {},
+            "clarifications": dict(prior.get("clarifications") or {}) if prior else {},
             "clarification_answer": None,
+            "prior_question": prior.get("question") if prior and prior.get("rows") is not None else None,
+            "prior_sql": prior.get("sql") if prior and prior.get("rows") is not None else None,
         }
 
     yield {"stage": "thinking"}

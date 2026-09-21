@@ -36,7 +36,13 @@ _CHART_TYPE_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("pie", re.compile(r"\bpie\s*(chart|graph)?\b")),
     ("line", re.compile(r"\b(line\s*(chart|graph)|trend\s*(line|chart))\b")),
     ("bar", re.compile(r"\bbar\s*(chart|graph)\b")),
-    ("table", re.compile(r"\b(as a table|table view|raw (data|rows|table)|in a table)\b")),
+    # Real bug, caught live: "table of top 10 products" fell through to
+    # shape-based inference (-> bar) because the old pattern only matched
+    # fixed phrases ("as a table", "table view", "in a table") and never
+    # the bare word "table" alone -- unlike pie/line/bar below, which all
+    # match on their single keyword. "raw data"/"raw rows" don't contain
+    # the word "table" so they're kept as explicit alternatives.
+    ("table", re.compile(r"\b(table|raw (data|rows))\b")),
     ("kpi", re.compile(r"\b(single number|just the (total|number)|one number)\b")),
 ]
 

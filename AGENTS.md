@@ -259,8 +259,140 @@ the rotated-label band as a fixed size independent of container height;
 fixed by raising that specific `XAxis` `height` prop plus truncating
 labels over 18 characters (full name stays in the tooltip).
 
+One more, caught live: narration hallucinated a "highest" claim on a
+24-row result ($602K claimed highest, real highest was $2.69M, not
+close) — root cause was asking the LLM to eyeball a max across a JSON
+blob, the same "don't delegate a deterministic computation to LLM
+judgment" mistake as the earlier chart bugs. Fixed with
+`_compute_extremes()` computing the true top/bottom over the FULL result
+set and handing it to the prompt as a verified fact. Verifying immediately
+found a second hallucination on top of the fix (an unverified "second
+place" claim — the named product was actually 9th of 24); tightened the
+prompt to forbid ranking anything beyond the pre-computed facts. Confirmed
+stable across 3 repeated live runs.
+
+**Chart-type follow-ups** ("now give it as a table" after "pie chart for
+top 5 products by sales") reuse the prior turn's SQL/rows instead of
+re-querying — `_is_chart_followup()` matches a message that's ONLY a
+chart-type request via a narrow anchored regex; anything with real extra
+content falls through to a fresh question, so an unrecognized phrasing
+just costs a normal query, never a wrong answer. Pulls the checkpointed
+prior turn (same `thread_id` mechanism the ambiguity node uses), re-runs
+`decide_chart` on the SAME rows, reuses the narration — no new LLM call,
+no new DB query, no risk of the regenerated SQL drifting from the
+original result. State is never mutated by this path, so a second
+follow-up still reuses the ORIGINAL data. Verified live in the browser
+and unit-tested; caught a real regex gap along the way ("now pie again"
+initially didn't match, "again" was missing from the trailing-word list).
+
+**Continuation questions** ("now the same for 7 days" after "daily revenue
+for the last 14 days") threw `Binder Error: column "units_sold" not
+found` — not a chart-followup phrasing, so it fell through to a cold
+fresh question with no memory of the prior turn, and the LLM drifted to
+an unrelated metric. Two fixes: (1) `prior_question`/`prior_sql` added to
+`AgentState` (must be declared or LangGraph silently drops them, same
+lesson as `clarification_answer`) plus `_recent_context_block()` injecting
+the previous question + SQL into the prompt with instructions to keep the
+same metric/shape on a continuation, ignore it otherwise; (2) tightened
+the prompt to state a metric's *name* is never a real column, only its
+`expression` field is — the LLM had confused `units_sold` (a metric name)
+with an actual column. Also fixed a hardcoded `clarifications: {}` reset
+on every fresh question found in the same code path, which broke the
+"remembered for the session" claim above. Verified live via curl (only
+the `INTERVAL` changed between turns, metric stayed on `sales.amount`) and
+a Playwright screenshot; unit-tested
+(`test_continuation_question_gets_prior_turn_as_context`). 43/43 tests
+pass.
+
 ### Phase 6 — polish
-Langfuse tracing, caching, proactive anomaly detection, README.
+
+**Golden eval harness** (`agent/eval.py`, out of order — before the rest
+of this phase). Every bug above was caught by a human eyeballing a live
+screenshot after it shipped; the mocked pytest suite only proves the
+LangGraph wiring, never that the LLM writes correct SQL for real English
+questions. `agent/eval.py` runs ~20 realistic scenarios (basic metrics,
+date math, both ambiguity cases, the out-of-scope refusal, explicit chart
+requests, the metric-name-vs-`expression` trap, the continuation and
+chart-followup cases) against the REAL `ask()` — real LLM, real DB — with
+structural assertions (SQL must/must-not contain X, correct chart type,
+correct refusal/ambiguity). `python -m agent.eval`, exits 1 on any
+failure. First run: 19/20 passed; the one failure was the eval's own
+assertion being too strict (demanded a column literal that correctly
+doesn't appear when no date range was asked), not an agent bug — fixed
+the assertion, re-verified. Ran entirely on the Ollama fallback (Gemini's
+daily quota was already exhausted) — confirmed the fallback holds up
+under real load.
+
+Langfuse tracing, caching, proactive anomaly detection, README — still open.
+
+### Phase 7 — dashboards (done)
+
+User-requested: pin charts from chat into persistent, arrangeable
+dashboards (PowerBI/Tableau-style), not just one-off chat answers.
+Layout/metadata lives in a **separate SQLite file**
+(`data/dashboards.sqlite3`, `api/dashboards_db.py`) — deliberately NOT a
+table in `data/askql.db`, so pinning/rearranging never needs a write
+connection to the single-writer DuckDB file (constraint 1). A pinned item
+stores only `question`/`sql`/chart-shape/`narration`, never a data
+snapshot — `GET /dashboards/{id}` (`api/dashboards.py`) re-runs each
+item's stored SQL live on every load, re-validated through
+`validate_select_only` every time (constraint 3 applies to stored SQL
+again, not just freshly-generated SQL). Frontend: `PinButton` on chat
+answers, `/dashboards` list, `/dashboards/[id]` grid
+(`react-grid-layout`) with drag/resize/remove, layout persisted via
+`PUT .../layout`.
+
+Two real bugs found live: (1) a custom `ResizeObserver` measuring a tile's
+content div and feeding that height back into the chart rendered INSIDE
+it created a feedback loop that corrupted Recharts' draw-in animation —
+valid SVG paths, real colors, `opacity:1`, but nothing visually drew;
+fixed by deleting the custom observer and passing Recharts'
+`ResponsiveContainer` a CSS `height="100%"` instead, letting it own its
+own resize-observation. (2) that fix surfaced a second bug: percentage
+height only resolves through ancestors with a DEFINITE height, and the
+pie/1:1-bar chart's legend wrapper was a plain `<div>` (height:auto) —
+confirmed via measurement that Recharts' container ended up with a
+literal `height: 0`. Fixed by making those wrappers `flex h-full
+flex-col` with the chart in a `min-h-0 flex-1` child; also disabled
+`isAnimationActive` everywhere since the draw-in animation has no reason
+to survive a container resizing right after mount. Verified: backend
+round-tripped via `TestClient` (including rejecting an unsafe `DELETE`
+pin attempt with 400); frontend verified live end-to-end in the browser
+(pinned two real charts, confirmed both fully render — not just axes —
+dragged to rearrange, confirmed layout survives a reload). `tsc`/`eslint`
+clean, all 43 pytest tests still pass.
+
+**Two more real bugs, reported live right after shipping:** (1) "table of
+top 10 products" got a bar chart — `decide_chart`'s table regex only
+matched fixed phrases ("as a table", "table view") and never the bare
+word "table" itself, unlike every other chart type's pattern. Fixed to
+match bare `table` too; regression test added, 44/44 pass. (2) dashboard
+tiles were only draggable from a ~20px title strip — the chart body
+carried `no-drag` (added for an unrelated reason alongside the
+ResizeObserver fix above), so dragging from the chart itself, the natural
+first attempt, silently did nothing. Fixed by making the whole tile a
+drag surface and scoping `no-drag` down to just the remove button; wheel-
+scroll inside a table tile is unaffected since it doesn't trigger
+`react-draggable`'s mousedown-based drag. Verified live: dragged a tile
+by its table body (not the header), confirmed it moved and the position
+survived a reload.
+
+**Added real frontend test coverage** (`web/e2e/dashboard.spec.ts`,
+`@playwright/test`, `npm run test:e2e` — requires both dev servers
+running) since every bug above was only ever caught by a human clicking
+around, never by anything automatic (`agent/eval.py` only covers the
+agent's SQL/chart-type logic, not frontend rendering/interaction). Two
+tests: "table of X" renders an actual `<table>`; a pinned chart's SVG has
+both a non-trivial `d` AND a non-trivial rendered width (checking `d`
+alone wouldn't have caught the ResizeObserver bug), then a drag from a
+point INSIDE the tile's body (not its header) changes and persists the
+position. First run of the drag test failed for a reason worth recording:
+the default Playwright viewport (1280x720) was smaller than the tile
+being dragged, so the drag's start coordinate was below the fold and hit
+nothing (`document.elementFromPoint` returned `null` there) — confirmed
+via a throwaway debug script that the identical drag worked fine with a
+bigger viewport. Fixed the TEST (viewport size +
+`scrollIntoViewIfNeeded()`), not the app. Both tests pass now.
 
 ---
 
