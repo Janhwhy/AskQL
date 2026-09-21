@@ -140,7 +140,8 @@ In active development.
 - [x] Phase 4 — full agent graph: self-correction (retry once), deterministic
       chart-type decision, narration, ambiguity clarification with session
       memory — 13/13 on the live test suite
-- [ ] Phase 5 — frontend
+- [x] Phase 5 — frontend: Next.js chat UI, real SSE streaming, dark/light
+      themes, ambiguity chips, charts via Recharts (`web/`)
 - [ ] Phase 6 — tracing, caching, anomaly detection
 
 ---

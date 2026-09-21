@@ -211,9 +211,53 @@ resolve the answer to a specific metric deterministically in code
 own prior question — the local Ollama fallback reliably failed at that even
 after the plumbing fix. Final run: 13/13 scenarios correct.
 
-### Phase 5 — frontend
-Next.js chat, Recharts, SSE streaming. Built last because the agent's output contract is
-stable by then.
+### Phase 5 — frontend (done)
+`web/` — Next.js (App Router) + TypeScript + Tailwind v4 + Recharts. `/chat`
+streams real SSE, one event per LangGraph node as it completes, not a
+simulated typing effect. Fixed a real deadlock risk: the FastAPI app held a
+write connection open app-wide while the agent opens its own read-only
+connection per query — changed the app's own connection to `read_only=True`.
+
+Dark-mode-first with a working light/dark toggle, palette reused from the
+`dataviz` skill's validated reference instance. No `claude-in-chrome`
+extension was connected, so visual verification used headless Playwright
+instead of skipping it — caught a redundant KPI caption, a currency-format
+heuristic that would have mislabeled day-counts and fractions as dollars,
+and a Recharts `dataKey` bug (a raw SQL alias containing a dot gets
+path-parsed as a string dataKey, silently breaking the line chart — fixed
+with function accessors).
+
+Two more real bugs found after initial ship (from a user screenshot and a
+reported error, not further self-review): a hydration mismatch in
+`ThemeToggle` (`isDark` read `window.matchMedia` synchronously during
+render, differing between server and client's first paint — fixed with the
+standard `mounted`-flag pattern), and `decide_chart`'s bar branch breaking
+on two categorical columns + one metric (e.g. "best selling products and
+their category" — put a category STRING on the numeric y-axis, no bars
+could render). Fixed by splitting columns by actual type, plus a second fix
+in the frontend's grouped-bar logic, which wrongly assumed a series value
+always repeats across x — false for a 1:1 mapping like "each product has
+exactly one category." Now detects real repetition vs. 1:1 and renders
+per-row colored bars with a proper legend for the 1:1 case.
+
+Three more real bugs, same session: (1) chart type never read the question
+— "pie chart for revenue by region" returned a bar chart, since chart
+selection is deliberately shape-only (constraint 4) and had no pie type at
+all. Fixed `decide_chart` to check for an explicit request in the question
+text first, added real pie support (`PieChartView`, capped at 8 slices,
+falls back to bar past that). (2) The SSE stream had no exception
+handling — any unhandled failure (confirmed live: Gemini rate-limited +
+Ollama fallback also down) killed the connection mid-stream with no
+terminal event, hanging the UI forever. Fixed with a try/except yielding a
+proper error event (raw exception stays server-side in the log, user gets
+a plain message), plus a client-side 45s idle timeout as a second layer
+against a genuine network stall with no exception to catch. (3) Long
+category names clipped in rotated bar labels — took three wrong theories
+(SVG margin, an ancestor's `overflow-x`, the container's total height)
+before measuring the ACTUAL DOM bounding boxes showed Recharts reserves
+the rotated-label band as a fixed size independent of container height;
+fixed by raising that specific `XAxis` `height` prop plus truncating
+labels over 18 characters (full name stays in the tooltip).
 
 ### Phase 6 — polish
 Langfuse tracing, caching, proactive anomaly detection, README.

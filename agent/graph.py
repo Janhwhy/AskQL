@@ -14,6 +14,7 @@ Ambiguity resolution is remembered across calls that share a `thread_id`, via
 LangGraph's own MemorySaver checkpointer -- not a hand-rolled session store.
 """
 
+import logging
 import re
 from datetime import date
 from typing import Optional, TypedDict
@@ -28,6 +29,8 @@ from .chart import ChartDecision, decide_chart
 from .context import clarifications_block, metrics_context
 from .llm import generate
 from .validation import UnsafeSQLError, validate_select_only
+
+logger = logging.getLogger("askql.agent")
 
 NO_METRIC_SENTINEL = "NO_METRIC:"
 AMBIGUOUS_SENTINEL = "AMBIGUOUS:"
@@ -310,7 +313,7 @@ def correct_sql(state: AgentState) -> AgentState:
 
 
 def decide_chart_node(state: AgentState) -> AgentState:
-    chart = decide_chart(state["columns"], state["rows"])
+    chart = decide_chart(state["columns"], state["rows"], question=state["question"])
     return {**state, "chart": chart}
 
 
@@ -428,4 +431,111 @@ def ask(question: str, thread_id: Optional[str] = None, clarification_answer: Op
         "chart": result["chart"],
         "narration": result["narration"],
         "retries": result["retries"],
+    }
+
+
+def ask_stream(question: Optional[str], thread_id: Optional[str] = None, clarification_answer: Optional[str] = None):
+    """Generator version of `ask()` for Phase 5's SSE endpoint. Yields one
+    dict per graph step AS IT ACTUALLY HAPPENS, via LangGraph's own
+    `.stream(..., stream_mode="updates")` — real node-by-node progress, not
+    a fabricated typing effect layered on top of a single blocking call.
+
+    Every yielded dict has a "stage" key. The stream always ends with
+    exactly one of: "clarification", "error", or "done".
+    """
+    app = _graph()
+    config = {"configurable": {"thread_id": thread_id or "__stateless__"}}
+
+    if clarification_answer is not None and thread_id is not None:
+        prior = app.get_state(config).values
+        question = prior.get("question", question)
+        state_in = {**prior, "question": question, "clarification_answer": clarification_answer}
+    else:
+        state_in = {
+            "question": question,
+            "sql": None,
+            "error": None,
+            "rows": None,
+            "columns": None,
+            "retries": 0,
+            "chart": None,
+            "narration": None,
+            "pending_clarification": None,
+            "clarifications": {},
+            "clarification_answer": None,
+        }
+
+    yield {"stage": "thinking"}
+
+    try:
+        for update in app.stream(state_in, config=config, stream_mode="updates"):
+            for node_name, partial in update.items():
+                if node_name == "generate_sql":
+                    if partial.get("pending_clarification"):
+                        yield {
+                            "stage": "clarification",
+                            "question": question,
+                            "clarification_needed": partial["pending_clarification"]["question"],
+                            "candidates": partial["pending_clarification"]["candidates"],
+                        }
+                        return
+                    if partial.get("sql") is None:
+                        yield {"stage": "error", "question": question, "error": partial.get("error")}
+                        return
+                    yield {"stage": "sql", "sql": partial["sql"]}
+
+                elif node_name == "run_sql":
+                    if partial.get("error"):
+                        if partial.get("retries", 0) < MAX_RETRIES:
+                            yield {"stage": "retrying", "error": partial["error"]}
+                        else:
+                            yield {"stage": "error", "question": question, "sql": partial.get("sql"), "error": partial["error"]}
+                            return
+                    else:
+                        yield {
+                            "stage": "result",
+                            "columns": partial["columns"],
+                            "rows": [dict(zip(partial["columns"], r)) for r in partial["rows"]],
+                        }
+
+                elif node_name == "correct_sql":
+                    yield {"stage": "sql", "sql": partial["sql"]}
+
+                elif node_name == "decide_chart":
+                    yield {"stage": "chart", "chart": partial["chart"]}
+
+                elif node_name == "narrate":
+                    yield {"stage": "narration", "narration": partial["narration"]}
+    except Exception as e:
+        # Real bug, found live: an unhandled exception anywhere in here
+        # (e.g. Gemini rate-limited AND the Ollama fallback also down —
+        # httpx.ConnectError) used to propagate straight out of this
+        # generator. FastAPI's StreamingResponse has no way to recover from
+        # that mid-stream — it just cuts the HTTP connection, and the
+        # frontend's fetch reader hangs forever waiting for a chunk that
+        # will never arrive, since no terminal event was ever sent. The
+        # docstring already claimed "always ends with clarification, error,
+        # or done" — this is what actually makes that true instead of just
+        # true in the cases that happened to get tested.
+        # Full exception (with the actual httpx/Gemini/Ollama internals)
+        # goes to the server log for debugging — the user gets a plain
+        # message, not a raw stack-trace-adjacent string like "Client
+        # error '404 Not Found' for url 'http://localhost:11434/...'".
+        logger.exception("ask_stream failed unexpectedly")
+        yield {
+            "stage": "error",
+            "question": question,
+            "error": "Something went wrong answering that — please try again in a moment.",
+        }
+        return
+
+    final = app.get_state(config).values
+    yield {
+        "stage": "done",
+        "question": question,
+        "sql": final.get("sql"),
+        "columns": final.get("columns"),
+        "rows": [dict(zip(final["columns"], r)) for r in final["rows"]] if final.get("rows") else [],
+        "chart": final.get("chart"),
+        "narration": final.get("narration"),
     }

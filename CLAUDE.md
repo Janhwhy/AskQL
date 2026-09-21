@@ -270,9 +270,128 @@ correct chart types and narration, 2 ambiguity round-trips that correctly
 asked then correctly resolved, 1 correct out-of-scope refusal) — all cross-
 checked against numbers hand-verified in earlier phases.
 
-### Phase 5 — frontend
-Next.js chat, Recharts, SSE streaming. Built last because the agent's output contract is
-stable by then.
+### Phase 5 — frontend (done)
+`web/` — Next.js (App Router) + TypeScript + Tailwind v4 + Recharts.
+`api/main.py`'s `/chat` endpoint streams real SSE, one event per LangGraph node
+as it actually completes (`agent/graph.py`'s new `ask_stream()`), not a
+simulated typing effect. Fixed a real deadlock risk found in review: the
+FastAPI app previously held a **write** connection open for its whole
+lifetime while the agent opens its own read-only one per query — DuckDB
+doesn't allow a write + read-only connection on the same file at once, so
+`/chat` would have failed the moment it was hit. Changed the app's own
+connection to `read_only=True` (it never wrote anyway).
+
+Design: dark-mode-first with a working light/dark toggle, palette reused
+verbatim from the `dataviz` skill's validated reference instance (CVD-safe,
+contrast-checked) so the UI chrome and embedded charts share one coherent
+set of colors. Ambiguity clarification renders as clickable chips; ran the
+full ask → clarify → resolve round trip live and it works.
+
+No `claude-in-chrome` extension was connected during the build, so visual
+verification used headless Playwright screenshots instead of skipping it.
+That caught three real bugs no type-check would have: a redundant KPI
+caption repeating the question already shown above it; a currency-format
+heuristic that would have mislabeled `avg_resolution_time_days` (a day
+count) and `churn_rate` (a fraction) as dollar amounts, fixed to format by
+column-name keyword instead of by the number's shape; and a Recharts
+`dataKey` bug — passing a raw SQL column alias like `"sum(sales.amount)"` as
+a string `dataKey` gets path-parsed (it contains a dot), silently breaking
+the line into disconnected trailing points on some queries. Fixed by
+switching every `dataKey` to a function accessor, which does a direct
+lookup and bypasses path parsing entirely.
+
+**Two more real bugs found after initial ship**, from an actual user
+screenshot and a reported error, not further self-review:
+- **Hydration mismatch in `ThemeToggle`** — `isDark` read `window.matchMedia`
+  synchronously during render whenever no theme was stored yet. The server
+  (no `window`) always rendered the Moon icon; the client's first render
+  (before any effect runs, but which React must reconcile against that
+  server HTML) already has `window`, so on a system in dark mode it
+  rendered Sun instead — a genuine server/client mismatch. Fixed with the
+  standard `mounted` flag pattern (same one `next-themes` uses): icon stays
+  at the server's deterministic value through hydration, flips to the real
+  preference in an effect afterward, which is a normal post-hydration
+  update, not part of the hydration diff.
+- **`decide_chart`'s bar-chart branch broke on two categorical dimensions
+  plus one metric** — e.g. "best selling products and their category"
+  returns columns `[name, category, units_sold]`; both `name` and
+  `category` are non-numeric. The old logic assumed "one categorical
+  column, everything else numeric," so it put the `category` STRING on the
+  numeric y-axis (no bars could render — Recharts can't map text to a bar
+  height) and mis-used `units_sold` as a per-row "series," producing one
+  legend swatch per row and no visible bars. Fixed `decide_chart` to split
+  columns by actual type (numeric -> y, categorical -> x then series) —
+  caught via a real screenshot, not proactive testing, then added a
+  regression test with that exact column shape. Separately, rendering that
+  correct decision uncovered a second issue: the frontend's grouped-bar
+  logic assumed a series value repeats across x (e.g. region repeating per
+  date) — wrong assumption for a 1:1 mapping like "each product has exactly
+  one category," where it pivoted into mostly-empty per-category bars.
+  Fixed by detecting whether x genuinely repeats; when it doesn't, render
+  one bar per row colored by its category via Recharts `Cell`, with a
+  proper small legend, instead of faking a grouped series.
+
+**Chart type never read the question — "pie chart for revenue by region"
+silently returned a bar chart.** Not a prompt-understanding failure: chart
+type is (deliberately, per constraint 4) a pure function of the query
+result SHAPE, and it had no pie chart type at all and never looked at the
+question text, so an explicit request had no way to take effect. Fixed
+`decide_chart` (`agent/chart.py`) to check for an explicit request
+("pie chart", "as a table", "bar chart", etc. via regex) BEFORE falling
+back to shape inference, and added real pie chart support end to end
+(`PieChartView` in `ChartRenderer.tsx`, capped at 8 slices — beyond that it
+silently falls back to bar, since an unreadable pie serves nobody even if
+technically what was asked for). 6 new Python tests cover the override
+behavior, including the case where the request can't be satisfied by the
+shape (e.g. "pie chart of total revenue" over a single number correctly
+degrades to `kpi`, not a meaningless one-slice pie).
+
+**The SSE stream could hang the UI forever with no error shown.**
+`ask_stream()` had no exception handling — any unhandled failure anywhere
+in the pipeline (confirmed live: Gemini 503 rate-limited AND the Ollama
+fallback also down, `httpx.ConnectError`/`404`) propagated straight out of
+the generator, FastAPI's `StreamingResponse` just cut the connection, and
+the frontend's fetch reader waited on a chunk that would never arrive —
+since no terminal event was ever sent, the docstring's claim ("always ends
+with clarification, error, or done") wasn't actually true, just true in
+the cases that happened to get tested. Fixed with a try/except around the
+whole generator body that yields a proper `{"stage": "error", ...}` event
+on any exception (full traceback still goes to the server log via
+`logger.exception`, only a plain message reaches the user — the raw
+exception text used to leak through, e.g. `"Client error '404 Not Found'
+for url 'http://localhost:11434/...'"`, not acceptable to show an end
+user). Added a client-side idle timeout in `lib/api.ts` too (45s, resets
+on every chunk) as defense against a genuine network stall that isn't an
+application-level exception at all — a dropped connection with no error
+and no more data, which the try/except alone can't catch since nothing
+throws.
+
+**Long category names clipped in rotated bar-chart axis labels** — a
+multi-hour real debugging chase, not a quick fix, because three different
+plausible-looking theories were each wrong in turn: (1) assumed it was the
+SVG's internal `margin.left` — increased it, no change, because measuring
+the label's actual DOM bounding box showed it already fit comfortably
+within the SVG's reported bounds; (2) assumed it was an ancestor's
+`overflow-x` (a real, separate CSS fact confirmed along the way: setting
+only `overflow-y: auto` makes the browser compute `overflow-x: auto` too,
+per the CSS spec's cross-axis coupling rule — real, but not what was
+clipping this) — walking the actual DOM ancestor chain showed every
+ancestor was `overflow: visible` except the `<svg>` element itself
+(`overflow: hidden`, its browser default); (3) assumed increasing the
+`ResponsiveContainer`'s total height would give the clipped label more
+room — measured the exact pixel overflow before and after and it was
+**identical**, proving Recharts reserves the rotated-label band as a fixed
+size (the `XAxis` `height` prop) regardless of the container's overall
+height; the extra height silently went entirely to the bars instead. The
+actual fix, once measured precisely instead of estimated: the `XAxis`
+`height` prop was 70px, real labels' rotated bounding boxes needed up to
+~91px — raised to 100px, plus truncating any category name over 18
+characters (with the full name still in the tooltip) so the space this
+needs is bounded instead of scaling with an arbitrary string length. The
+lesson, restated because it mattered three times in this one bug: verify
+with actual DOM measurements (`getBoundingClientRect`, computed styles),
+not layout-math estimation — every wrong theory here was plausible and
+every one was falsified by 30 seconds of real measurement.
 
 ### Phase 6 — polish
 Langfuse tracing, caching, proactive anomaly detection, README.

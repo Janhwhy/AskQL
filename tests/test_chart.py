@@ -45,6 +45,20 @@ def test_categorical_no_time_is_bar():
     assert result == {"chart_type": "bar", "x": "region", "y": "revenue", "series": None}
 
 
+def test_two_categorical_dimensions_one_metric_is_bar_with_series():
+    """Real bug, caught from a live screenshot: "best selling products AND
+    their category" returns columns [name, category, units_sold] -- both
+    name and category are non-numeric. The old logic treated "everything
+    after the first categorical column" as numeric, so it put the category
+    STRING on the numeric y-axis (no bars could render at all) and turned
+    units_sold into a fake per-value legend series. y must land on the one
+    actually-numeric column regardless of how many categorical columns
+    precede it."""
+    rows = [("DocSpace", "Collaboration & Productivity", 8305), ("TaskRiver", "Collaboration & Productivity", 7200)]
+    result = decide_chart(["name", "category", "units_sold"], rows)
+    assert result == {"chart_type": "bar", "x": "name", "y": "units_sold", "series": "category"}
+
+
 def test_empty_rows_is_table_fallback():
     assert decide_chart(["day", "value"], [])["chart_type"] == "table"
 
@@ -52,3 +66,49 @@ def test_empty_rows_is_table_fallback():
 def test_all_numeric_multi_column_no_category_is_table_fallback():
     result = decide_chart(["a", "b"], [(1, 2), (3, 4)])
     assert result["chart_type"] == "table"
+
+
+# --- explicit chart-type requests (real bug: "pie chart for revenue by
+# region" silently returned a bar chart, because chart type never read the
+# question at all — this class of test is what would have caught it) ---
+
+
+def test_explicit_pie_request_overrides_shape_inference():
+    rows = [("EMEA", 100.0), ("APAC", 80.0)]
+    result = decide_chart(["region", "revenue"], rows, question="pie chart for revenue by region")
+    assert result == {"chart_type": "pie", "x": "region", "y": "revenue", "series": None}
+
+
+def test_explicit_pie_request_various_phrasings():
+    rows = [("EMEA", 100.0), ("APAC", 80.0)]
+    for phrasing in ["show this as a pie", "give me a pie graph", "PIE CHART please"]:
+        result = decide_chart(["region", "revenue"], rows, question=phrasing)
+        assert result["chart_type"] == "pie", phrasing
+
+
+def test_explicit_bar_request_overrides_line_inference():
+    """Same time+dimension shape that would normally become a line chart —
+    an explicit "bar chart" ask should win."""
+    rows = [(date(2026, 9, 18), "EMEA", 100.0), (date(2026, 9, 18), "APAC", 80.0)]
+    result = decide_chart(["day", "region", "revenue"], rows, question="bar chart of revenue by region")
+    assert result["chart_type"] == "bar"
+
+
+def test_explicit_table_request_overrides_everything():
+    rows = [("EMEA", 100.0), ("APAC", 80.0)]
+    result = decide_chart(["region", "revenue"], rows, question="show me this as a table")
+    assert result == {"chart_type": "table", "x": None, "y": None, "series": None}
+
+
+def test_pie_request_falls_back_when_shape_cant_support_it():
+    """A single total has no categories to slice -- "pie chart of total
+    revenue" should degrade to kpi, not force a meaningless one-slice pie."""
+    result = decide_chart(["total_revenue"], [(50000.0,)], question="pie chart of total revenue")
+    assert result["chart_type"] == "kpi"
+
+
+def test_no_explicit_request_still_infers_from_shape():
+    """Unchanged default behavior when the question doesn't name a chart type."""
+    rows = [("EMEA", 100.0), ("APAC", 80.0)]
+    result = decide_chart(["region", "revenue"], rows, question="revenue by region")
+    assert result["chart_type"] == "bar"

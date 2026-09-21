@@ -426,11 +426,31 @@ type, real narration, numbers cross-checked against earlier hand-verified
 figures), 2 ambiguity round-trips that asked then correctly resolved, 1
 correct out-of-scope refusal.
 
-### Phase 5 — Frontend (weekend 4)
-Next.js chat box, Recharts rendering the agent's JSON, SSE streaming.
+### Phase 5 — Frontend — **done, 2026-09-20**
+Next.js chat box (`web/`), Recharts rendering the agent's JSON, real SSE
+streaming — one event per LangGraph node as it actually completes
+(`agent/graph.py`'s `ask_stream()`), not a simulated typing effect.
 
 Built last because the agent's output format is stable by now — building UI against a
 changing API is miserable.
+
+Fixed a real deadlock risk in review: the FastAPI app held a **write**
+connection open for its whole lifetime while the agent opens its own
+read-only connection per query — DuckDB doesn't allow a write and a
+read-only connection on the same file at once, so `/chat` would have failed
+the moment it was hit. Changed the app's own connection to `read_only=True`.
+
+Design: dark-mode-first with a light/dark toggle, palette reused from the
+`dataviz` skill's validated reference instance so the UI and its charts
+share one coherent color system. No `claude-in-chrome` extension was
+connected, so visual verification used headless Playwright screenshots
+instead of skipping it — caught three real bugs: a redundant KPI caption,
+a currency-format heuristic that would have mislabeled a day-count metric
+and a fraction metric as dollars (fixed to format by column-name keyword,
+not by the number's shape), and a Recharts `dataKey` bug where a raw SQL
+column alias containing a dot (`"sum(sales.amount)"`) gets silently
+path-parsed as a string dataKey, breaking the line into disconnected
+trailing points — fixed with function accessors, which do a direct lookup.
 
 ### Phase 6 — Polish
 Langfuse tracing, caching, proactive anomaly detection, README with the thesis.
