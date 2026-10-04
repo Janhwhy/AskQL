@@ -1,6 +1,6 @@
 "use client";
 
-import { MessageCircleQuestion } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 
 /**
  * The project's actual differentiator (CLAUDE.md): when 2+ metrics
@@ -26,10 +26,13 @@ export function ClarificationChips({
   disabled?: boolean;
 }) {
   return (
-    <div className="flex flex-col gap-2.5">
-      <div className="flex items-start gap-2 text-sm text-ink-primary">
-        <MessageCircleQuestion size={16} className="mt-0.5 shrink-0 text-accent" />
-        <span>{question}</span>
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-2">
+        <span className="kicker flex items-center gap-2 !text-accent">
+          <span className="animate-pulse-ring h-1.5 w-1.5 rounded-full bg-accent" />
+          Before I guess — which one?
+        </span>
+        <p className="font-display text-[1.45rem] leading-snug text-ink-primary">{question}</p>
       </div>
       <div className="flex flex-wrap gap-2">
         {candidates.map((c) => (
@@ -37,12 +40,14 @@ export function ClarificationChips({
             key={c}
             disabled={disabled}
             onClick={() => onPick(humanize(c))}
-            className="cursor-pointer rounded-full border border-border-strong bg-surface px-3.5 py-1.5 text-sm text-ink-primary capitalize transition-colors hover:border-accent hover:bg-accent-wash disabled:cursor-not-allowed disabled:opacity-50"
+            className="group flex cursor-pointer items-center gap-2 rounded-full border border-border-strong bg-surface-raised px-4 py-2 text-[13.5px] text-ink-primary capitalize transition-all hover:border-accent hover:bg-accent-wash disabled:cursor-not-allowed disabled:opacity-50"
           >
             {humanize(c)}
+            <ArrowRight size={13} className="text-ink-muted transition-transform group-hover:translate-x-0.5 group-hover:text-accent" />
           </button>
         ))}
       </div>
+      <p className="text-xs text-ink-muted">Your choice is remembered for the rest of this chat.</p>
     </div>
   );
 }

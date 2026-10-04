@@ -1,20 +1,14 @@
 "use client";
 
+import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { streamChat } from "@/lib/api";
-import type { ChatEvent, Turn } from "@/lib/types";
+import { getChat } from "@/lib/chatApi";
+import type { ChatEvent, SavedTurn, Turn } from "@/lib/types";
+import { useChats } from "@/components/shell/ChatsProvider";
 import { ChatInput } from "./ChatInput";
 import { EmptyState } from "./EmptyState";
 import { MessageTurn } from "./MessageTurn";
-
-const STAGE_LABELS: Record<string, string> = {
-  thinking: "Thinking…",
-  sql: "Finding the right metric…",
-  retrying: "Hit an error, retrying once…",
-  result: "Running the query…",
-  chart: "Building the chart…",
-  narration: "Writing the insight…",
-};
 
 function newTurn(question: string): Turn {
   return {
@@ -29,19 +23,61 @@ function newTurn(question: string): Turn {
     clarification: null,
     error: null,
     retried: false,
-    stageLabel: STAGE_LABELS.thinking,
+    stage: "thinking",
+    fresh: true,
   };
 }
 
-export function ChatShell() {
+function fromSaved(t: SavedTurn): Turn {
+  return { ...t, retried: false, stage: null };
+}
+
+/**
+ * One conversation. `chatId === null` is a new, unsaved chat: the first
+ * message mints an id (which the backend uses as the agent's thread_id AND
+ * the saved chat's id), then swaps the URL to /c/{id} with replaceState --
+ * Next's router syncs usePathname to it without a navigation, so this
+ * component (and the answer streaming into it) is never remounted.
+ *
+ * Turns are persisted server-side by /chat itself (api/main.py), never from
+ * here -- this component only renders and, for a saved chat, hydrates.
+ */
+export function ChatShell({ chatId }: { chatId: string | null }) {
+  const { refresh, setBusy: setGlobalBusy } = useChats();
+  const pathname = usePathname();
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
-  const threadId = useRef<string>(crypto.randomUUID());
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const [loading, setLoading] = useState(chatId !== null);
+  const [missing, setMissing] = useState(false);
+  const threadId = useRef<string | null>(chatId);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [turns]);
+    if (!chatId) return;
+    let cancelled = false;
+    getChat(chatId)
+      .then((chat) => !cancelled && setTurns(chat.turns.map(fromSaved)))
+      .catch(() => !cancelled && setMissing(true))
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [chatId]);
+
+  // "New question" while already on a fresh chat that has since been given
+  // an id via replaceState: the router sees /c/{id} -> / as a same-page
+  // navigation and keeps this component mounted, so reset it explicitly.
+  useEffect(() => {
+    if (chatId === null && pathname === "/" && threadId.current !== null) {
+      threadId.current = null;
+      setTurns([]);
+    }
+  }, [pathname, chatId]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && turns.length > 0) el.scrollTo({ top: el.scrollHeight, behavior: loading ? "auto" : "smooth" });
+  }, [turns, loading]);
 
   const updateLastTurn = useCallback((updater: (t: Turn) => Turn) => {
     setTurns((prev) => {
@@ -56,51 +92,33 @@ export function ChatShell() {
     (event: ChatEvent) => {
       switch (event.stage) {
         case "thinking":
-          updateLastTurn((t) => ({ ...t, stageLabel: STAGE_LABELS.thinking }));
+          updateLastTurn((t) => ({ ...t, stage: "thinking" }));
           break;
         case "sql":
-          updateLastTurn((t) => ({ ...t, sql: event.sql, stageLabel: STAGE_LABELS.sql }));
+          updateLastTurn((t) => ({ ...t, sql: event.sql, stage: "sql" }));
           break;
         case "retrying":
-          updateLastTurn((t) => ({ ...t, retried: true, stageLabel: STAGE_LABELS.retrying }));
+          updateLastTurn((t) => ({ ...t, retried: true, stage: "retrying" }));
           break;
         case "result":
-          updateLastTurn((t) => ({
-            ...t,
-            columns: event.columns,
-            rows: event.rows,
-            stageLabel: STAGE_LABELS.result,
-          }));
+          updateLastTurn((t) => ({ ...t, columns: event.columns, rows: event.rows, stage: "result" }));
           break;
         case "chart":
-          updateLastTurn((t) => ({ ...t, chart: event.chart, stageLabel: STAGE_LABELS.chart }));
+          updateLastTurn((t) => ({ ...t, chart: event.chart, stage: "chart" }));
           break;
         case "narration":
-          updateLastTurn((t) => ({
-            ...t,
-            narration: event.narration,
-            stageLabel: STAGE_LABELS.narration,
-          }));
+          updateLastTurn((t) => ({ ...t, narration: event.narration, stage: "narration" }));
           break;
         case "clarification":
           updateLastTurn((t) => ({
             ...t,
             status: "clarification",
-            clarification: {
-              question: event.clarification_needed,
-              candidates: event.candidates,
-            },
-            stageLabel: null,
+            clarification: { question: event.clarification_needed, candidates: event.candidates },
+            stage: null,
           }));
           break;
         case "error":
-          updateLastTurn((t) => ({
-            ...t,
-            status: "error",
-            error: event.error,
-            sql: event.sql ?? t.sql,
-            stageLabel: null,
-          }));
+          updateLastTurn((t) => ({ ...t, status: "error", error: event.error, sql: event.sql ?? t.sql, stage: null }));
           break;
         case "done":
           updateLastTurn((t) => ({
@@ -111,7 +129,7 @@ export function ChatShell() {
             rows: event.rows,
             chart: event.chart,
             narration: event.narration,
-            stageLabel: null,
+            stage: null,
           }));
           break;
       }
@@ -121,7 +139,15 @@ export function ChatShell() {
 
   const runTurn = useCallback(
     async (question: string | null, clarificationAnswer: string | null) => {
+      let isNewChat = false;
+      if (threadId.current === null) {
+        threadId.current = crypto.randomUUID();
+        isNewChat = true;
+        window.history.replaceState(null, "", `/c/${threadId.current}`);
+      }
       setBusy(true);
+      setGlobalBusy(true);
+      let first = true;
       try {
         for await (const event of streamChat({
           question,
@@ -129,22 +155,25 @@ export function ChatShell() {
           clarification_answer: clarificationAnswer,
         })) {
           applyEvent(event);
+          // The backend creates the chat row before streaming starts, so
+          // the sidebar can show a brand-new chat right away.
+          if (first && isNewChat) void refresh();
+          first = false;
         }
       } catch (e) {
         updateLastTurn((t) => ({
           ...t,
           status: "error",
-          error:
-            e instanceof Error
-              ? `Couldn't reach the agent: ${e.message}`
-              : "Something went wrong talking to the agent.",
-          stageLabel: null,
+          error: e instanceof Error ? `Couldn't reach the agent: ${e.message}` : "Something went wrong talking to the agent.",
+          stage: null,
         }));
       } finally {
         setBusy(false);
+        setGlobalBusy(false);
+        void refresh();
       }
     },
-    [applyEvent, updateLastTurn]
+    [applyEvent, updateLastTurn, refresh, setGlobalBusy]
   );
 
   function handleSend(question: string) {
@@ -153,32 +182,52 @@ export function ChatShell() {
   }
 
   function handleClarify(answer: string) {
-    updateLastTurn((t) => ({
-      ...t,
-      status: "streaming",
-      clarification: null,
-      stageLabel: STAGE_LABELS.thinking,
-    }));
+    updateLastTurn((t) => ({ ...t, status: "streaming", clarification: null, stage: "thinking" }));
     void runTurn(null, answer);
   }
 
+  const empty = !loading && turns.length === 0;
+
   return (
     <div className="flex h-full flex-col">
-      <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-8">
-        <div className="mx-auto flex max-w-3xl flex-col gap-6">
-          {turns.length === 0 ? (
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto flex w-full max-w-[880px] flex-col px-5 pt-10 pb-10 sm:px-10">
+          {missing ? (
+            <div className="animate-rise py-24 text-center">
+              <p className="font-display text-4xl text-ink-primary">This chat isn&apos;t here.</p>
+              <p className="mt-2 text-sm text-ink-muted">It may have been deleted. Start a new question from the sidebar.</p>
+            </div>
+          ) : loading ? (
+            <div className="flex flex-col gap-4 py-10" aria-label="Loading chat">
+              {[0, 1].map((i) => (
+                <div key={i} className="h-32 animate-pulse rounded-3xl bg-surface/70" />
+              ))}
+            </div>
+          ) : empty ? (
             <EmptyState onPick={handleSend} />
           ) : (
-            turns.map((turn) => (
-              <MessageTurn key={turn.id} turn={turn} onClarify={handleClarify} />
-            ))
+            <div className="flex flex-col gap-14">
+              {turns.map((turn, i) => (
+                <MessageTurn
+                  key={turn.id}
+                  index={i + 1}
+                  turn={turn}
+                  onClarify={handleClarify}
+                  disabled={busy}
+                />
+              ))}
+            </div>
           )}
-          <div ref={bottomRef} />
         </div>
       </div>
-      <div className="border-t border-border px-4 py-4 sm:px-8">
-        <div className="mx-auto max-w-3xl">
-          <ChatInput onSend={handleSend} disabled={busy} />
+      <div className="relative shrink-0 px-5 pb-5 sm:px-10">
+        <div className="pointer-events-none absolute inset-x-0 -top-10 h-10 bg-gradient-to-t from-plane to-transparent" />
+        <div className="mx-auto max-w-[880px]">
+          <ChatInput
+            onSend={handleSend}
+            disabled={busy || missing}
+            hasHistory={turns.some((t) => t.status === "done")}
+          />
         </div>
       </div>
     </div>

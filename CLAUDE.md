@@ -693,6 +693,199 @@ coordinates-relative-to-tile, drag registered immediately
 before computing drag coordinates) rather than the app. Both tests pass
 after the fix.
 
+### Phase 8 — saved chats, UI revamp, customizable dashboards (done)
+
+Plan: `docs/phase-8-plan.md`. User-requested: chats that persist (rename,
+pin, delete, like an AI app), a full visual redesign, and Power BI-style
+tile customization.
+
+**Saved chats.** `api/chats_db.py` is a separate SQLite file,
+`data/chats.sqlite3`, kept apart from DuckDB for the same constraint-1 reason
+as dashboards. `api/chats.py` provides list, get, PATCH (title/pinned) and
+DELETE. Turns are written **server-side** by `/chat` (`api/main.py`) when the
+stream hits its terminal event, never by the frontend, so a transcript can't
+disagree with what the agent recorded. A clarification answer updates its
+turn in place. The chat id IS the agent's `thread_id`. Chat turns are a
+**snapshot** (rows capped at 2000), on purpose. Dashboards are the opposite:
+they stay live. `ChatRequest.save=false` keeps a thread without filing a chat
+(used by the dashboard "Ask to add" bar).
+
+**The agent's context now survives restarts.** Before this phase,
+`MemorySaver` was in-memory only, so reopening a saved chat after an API
+restart would have silently lost what "now the same for 7 days" referred to.
+It's now `SqliteSaver` (`data/checkpoints.sqlite3`, dep
+`langgraph-checkpoint-sqlite`). `forget_thread()` drops a deleted chat's
+context. `tests/conftest.py` gives every test a fresh in-memory graph, because
+the tests reuse fixed thread ids and a persistent saver would leak state
+between runs. Verified live: killed and restarted the API, sent "now the same
+for 7 days" on the old thread, and only `INTERVAL 14` → `INTERVAL 7` changed.
+
+**UI: "Observatory" design system** (`web/app/globals.css`).
+- Type: Instrument Serif for display, Geist for body, Geist Mono for kickers
+  and SQL.
+- Color: warm near-black (dark-first) and warm paper (light), with one accent,
+  the amber→orange "beam". It runs as the top rail and scans while an answer
+  streams, and it marks active nav. It sits on a dot-grid canvas with grain.
+- Chart series colors are untouched (the dataviz palette).
+- Routes moved into an `app/(app)/` group sharing `AppShell`, with a single
+  sidebar that becomes a drawer on mobile. `/` is a new chat and `/c/[id]` a
+  saved one. The first message swaps the URL with `history.replaceState`, so
+  the streaming answer never remounts.
+
+**Dashboards.** Migrations are additive and idempotent (`ALTER TABLE ADD
+COLUMN` when missing): `description`, `kind` (chart|text), `config_json`.
+- `TileConfig` (validated Pydantic) holds title, color (palette slot 1–8),
+  `display_type` (line/area/bar/hbar/pie/donut/table/kpi), legend and
+  narration toggles. It is presentation only and never touches stored SQL.
+- Text tiles render a tiny markdown subset as React elements, never as HTML.
+- New endpoints: duplicate tile, rename/describe dashboard.
+- Frontend: View/Edit mode (drag and resize only in Edit), a `TileInspector`
+  format pane that offers only display types compatible with the result
+  shape (`compatibleDisplayTypes`), an "Ask to add" bar, and blueprint
+  thumbnails in the gallery.
+
+**Real bugs caught by verification, not shipped:**
+- `AppShell` rendered the sidebar twice (desktop and mobile drawer). That
+  duplicated every landmark and chat row and was caught by a Playwright
+  strict-mode violation.
+- `.beam-gradient` was unlayered CSS. In Tailwind v4 unlayered CSS beats every
+  layered utility, so `disabled:` overrides silently never applied and the
+  send button looked enabled when empty. Component classes now live in
+  `@layer components`.
+- The empty state auto-scrolled to the bottom on mount and cropped the hero.
+
+**Tests:** 56 pytest (new: `tests/test_chats_and_tiles.py`). e2e:
+`chats.spec.ts` (persist, reload with agent context, rename, pin, delete) and
+`dashboard-customize.spec.ts` (title, donut, color, text tile, persisted;
+API-seeded, no LLM). `dashboard.spec.ts` now switches to Edit before
+dragging. All 4 e2e pass, though `dashboard.spec`'s second LLM question
+failed once when Gemini returned 503 and the Ollama fallback hit its 60s
+timeout. That's environmental; it passed on rerun. Note: `tests/test_metrics.py`
+needs the API stopped, because it opens DuckDB for write (constraint 1).
+
+### Phase 8b — Power BI-style report canvas, rich text boxes (done)
+
+User-requested follow-up: the dashboard should behave like a Power BI
+report rather than a stacking grid. Text should be placeable and fully
+formattable like any visual. The UI should use sans fonts only. The "View
+SQL" line should come off answers, and the loading animation should get
+more polish.
+
+**Dashboards are reports now: pages of free-form canvases.**
+`react-grid-layout` is gone. The model:
+- `dashboard_pages` (name, position, width × height, default 1280×720, background).
+- Each item has `page_id` and an absolute layout in page px (`x/y/w/h`)
+  plus `layout_z` for stacking.
+- Pre-8b rows held 12-col grid units. A `layout_units` column (default
+  'grid') makes `_migrate_data` convert exactly those rows to pixels once,
+  give every old dashboard a "Page 1", and grow a page to fit anything
+  that used to be visible. It's idempotent, and there's a test for it.
+- The user's real DB was backed up before the first migration ran.
+- New items land in the first free spot on the page (`_free_spot`), never
+  under another visual.
+- Endpoints: `POST/PATCH/DELETE .../pages`, z in `PUT .../layout`.
+
+**Frontend** (`web/components/report/`):
+- `ReportCanvas` owns all direct manipulation: select, drag, 8-handle
+  resize, snapping, keyboard nudge/delete/duplicate.
+- `geometry.ts` is the pure snap math: smart guides to other visuals' and
+  the page's edges/centers, else an 8px grid.
+- Selection chrome sits in an overlay layer above every visual, so handles
+  are never buried under a higher-z neighbour.
+- Charts render at real screen size (scaled coordinates, not a CSS
+  transform) so Recharts' hover math stays exact. Text boxes ARE
+  transform-scaled, so per-selection pixel font sizes zoom with the page.
+- `CanvasItem` is memoized, so during a drag only the dragged visual
+  re-renders.
+- Also: `Ribbon` (insert text / ask a visual / arrange / zoom), `FormatPane`
+  (page, visual or text-box settings), `PageTabs`, and `FocusModal`
+  (Power BI focus mode).
+
+**Rich text boxes.** The editor is `contentEditable` with
+`document.execCommand` (`richtext.ts`):
+- Inline marks act on the selection: bold, italic, underline, strike,
+  color, pixel size via the size-7 sentinel trick, lists, and paragraph
+  styles.
+- Box-level settings: font family (sans only), size, alignment, vertical
+  alignment, line height, container styling.
+- **Stored HTML only ever passes `api/richtext.py`**: a stdlib allowlist
+  sanitizer covering tags, a filtered `style` attribute, and no
+  `url()`/expression/handlers/links. Tested with script, `onclick`,
+  `img onerror`, `javascript:` and `url()` payloads.
+- Legacy markdown text tiles still render, via `config.text_format`.
+
+**Real bugs caught while verifying (not shipped):**
+- **Unlayered global CSS beat every Tailwind v4 utility.** The base
+  `* { border-color }` rule silently overrode every
+  `border-accent`/`border-border-strong` in the app since Phase 8, so
+  selected states never showed their colored edge. `:focus-visible` beat
+  `outline-none` the same way, putting an orange ring on the text editor.
+  Found by reading the computed style, not a screenshot. Both rules moved
+  to `@layer base`. This is the same lesson as Phase 8's `.beam-gradient`,
+  now applied to element rules too.
+- **Every alignment-guide snap 422'd.** Centering an odd width lands on a
+  half pixel, the API takes integer px, and the failed save reloaded the
+  tile back to where it started. The drag *looked* fine mid-gesture.
+  Caught by an e2e assertion, then reproduced with a probe. Fixed by
+  rounding at commit.
+- **Formatting made in the last ~800ms before leaving was lost.** The text
+  autosave was debounced with no flush on exit. Text now flushes on
+  unmount and `pagehide` with a `keepalive` request.
+- A drag commit was made inside a `setState` updater, which StrictMode
+  double-invokes, so it could save twice. It now commits from a ref.
+
+**Text boxes, hands-on QA in Chrome (reported "not working properly").**
+Driven feature by feature through real clicks in the user's Chrome
+(claude-in-chrome). Every one of these was a real defect, now fixed:
+- **A typed font size hit the whole box, not the selected words.** Focusing
+  the size input dropped the live selection. `hasRangeSelection` now also
+  honours the selection saved just before focus moved into the toolbar.
+- **The box never grew.** A second line or a heading pushed text out of view
+  behind an inner scrollbar, so formatting *looked* broken when it had
+  applied. The box now auto-grows to fit (`TextBox.fit` →
+  `ReportCanvas.onGrow`).
+- **Format-pane number fields were untypeable.** Every keystroke was
+  clamped: typing 24 gave 84. They now keep a draft while typing and clamp
+  on commit.
+- **Box-level size/color/font only partly applied.** Per-word inline
+  overrides won. A box-level change now clears that one property from
+  every span, in the live editor or the stored HTML.
+- **"Theme color" ran `removeFormat`, wiping bold/italic/underline.** It now
+  uses the sentinel trick: apply a marker color, then strip only that
+  color.
+- **Font picker was box-only.** It now applies per selection via
+  `var(--font-…)` inline styles. The sanitizer allows `var()` for
+  `font-family` only.
+- **Caret and clicking.** The caret always jumped to the end, and clicking a
+  selected box did nothing. The caret now goes where you click, and a click
+  on an already-selected box starts typing (PowerPoint behaviour).
+- **Smaller fixes:**
+  - Paste is plain text.
+  - Dragging no longer highlights text (`select-none`).
+  - The action bar no longer covers top-of-page content.
+  - The toolbar's size field shows the caret's real size.
+
+Regression e2e: `text box formatting: selection-only size/font/color, …`
+in `dashboard-customize.spec.ts`.
+
+**Chat:**
+- SQL moved from a full-width "View SQL" row into one icon button beside
+  Pin (`SqlButton`). It's still one click away on every answer, per the
+  trust-mechanics rule.
+- Loading now shows a live elapsed timer, shimmering stage bars, the SQL
+  typing itself out, and a skeleton of the coming answer.
+- Fresh answers reveal word by word and the chart wipes in; reopened chats
+  render instantly.
+- Instrument Serif is removed: Geist for everything, mono only for code.
+  "Northbeam · governed" is gone from the top left.
+
+**Tests:**
+- 58 pytest (pages, free placement, sanitizer, z-order, grid→px migration).
+- 5 e2e, all passing. `dashboard-customize.spec.ts` covers format a
+  visual, bold text, drag with persistence and integer snapping, and
+  add/rename page. `dashboard.spec.ts` was ported off `.react-grid-item`.
+- `tsc`, `eslint` and `next build` are clean.
+
 ---
 
 ## Repo layout (suggested)
@@ -728,7 +921,7 @@ askql/
 - `data/askql.db` is gitignored; ship a seed script instead
 - Tests for the validation layer and metric loading at minimum — the agent nodes are
   harder to test, but SQL validation must be covered
-- Any change to chart rendering, dashboard grid/drag, or the pin flow needs a
+- Any change to chart rendering, the report canvas (drag/resize/snap, text boxes, pages), or the pin flow needs a
   `web/e2e/*.spec.ts` case (`npm run test:e2e`, real browser, real DOM
   assertions) — every one of Phase 7's bugs was a frontend rendering/interaction
   bug that `agent/eval.py` structurally cannot see, since it never touches a

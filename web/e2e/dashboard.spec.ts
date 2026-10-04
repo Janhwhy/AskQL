@@ -69,7 +69,7 @@ test("a pinned chart renders real geometry, and dragging a tile by its body pers
   await page.goto("/dashboards");
   await page.getByRole("link", { name: new RegExp(dashboardName) }).click();
 
-  const tiles = page.locator(".react-grid-item");
+  const tiles = page.getByTestId("chart-tile");
   await expect(tiles).toHaveCount(2);
 
   // Both tiles must show REAL content, not just exist. A table needs rows;
@@ -78,15 +78,21 @@ test("a pinned chart renders real geometry, and dragging a tile by its body pers
   // plausible-looking `d` string whose stroke never actually drew, so
   // checking `d` length alone (without also checking the rendered box)
   // would have passed even on the broken version.
-  await expect(page.locator(".react-grid-item table")).toBeVisible();
-  expect(await page.locator(".react-grid-item table tbody tr").count()).toBeGreaterThan(0);
+  await expect(page.getByTestId("chart-tile").locator("table")).toBeVisible();
+  expect(await page.getByTestId("chart-tile").locator("table tbody tr").count()).toBeGreaterThan(0);
 
-  const dashLine = page.locator(".react-grid-item path.recharts-line-curve").first();
+  const dashLine = page.getByTestId("chart-tile").locator("path.recharts-line-curve").first();
   await expect(dashLine).toBeVisible({ timeout: 15_000 });
   const d = await dashLine.getAttribute("d");
   expect(d?.length ?? 0).toBeGreaterThan(20);
   const lineBox = await dashLine.boundingBox();
   expect(lineBox?.width ?? 0).toBeGreaterThan(50);
+
+  // Phase 8: dragging is an Edit-mode affordance (View mode is a clean
+  // presentation surface). Phase 8b: tiles are free-placed canvas visuals,
+  // not react-grid-layout items -- same interaction, same assertions.
+  // presentation surface), so switch modes first.
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
 
   // Drag the second tile by a point well INSIDE its body (not the title
   // row) -- this is the exact interaction that used to do nothing.
@@ -109,7 +115,9 @@ test("a pinned chart renders real geometry, and dragging a tile by its body pers
   // Layout persistence: PUT /dashboards/{id}/layout must have actually
   // been called and saved, not just updated client-side state.
   await page.reload();
-  await expect(page.locator(".react-grid-item")).toHaveCount(2);
-  const persistedStyle = await page.locator(".react-grid-item").nth(1).getAttribute("style");
+  await expect(page.getByTestId("chart-tile")).toHaveCount(2);
+  // same mode as the drag, so the same zoom -> comparable screen positions
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  const persistedStyle = await page.getByTestId("chart-tile").nth(1).getAttribute("style");
   expect(persistedStyle).toBe(afterStyle);
 });

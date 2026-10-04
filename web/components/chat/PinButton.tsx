@@ -77,14 +77,14 @@ export function PinButton({
           setError(null);
           setOpen((v) => !v);
         }}
-        className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-xs text-ink-secondary transition-colors hover:border-accent hover:text-accent"
+        className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border-strong bg-surface-raised px-3 py-1.5 text-[12.5px] text-ink-secondary transition-colors hover:border-accent hover:text-ink-primary"
       >
-        <Pin size={12} />
+        <Pin size={12} className="text-accent" />
         Pin to dashboard
       </button>
 
       {open && (
-        <div className="animate-fade-up absolute right-0 z-10 mt-2 w-64 rounded-xl border border-border-strong bg-surface-raised p-2 shadow-lg">
+        <div className="animate-fade-up panel absolute right-0 top-full z-30 mt-2 w-72 rounded-2xl p-2">
           {pinnedTo ? (
             <div className="flex items-center gap-2 px-2 py-3 text-sm text-status-good">
               <Check size={16} />
@@ -92,7 +92,7 @@ export function PinButton({
             </div>
           ) : (
             <>
-              <p className="px-2 pb-1.5 pt-1 text-xs font-medium text-ink-muted">
+              <p className="kicker px-2 pt-1 pb-2">
                 Pin to a dashboard
               </p>
               <div className="max-h-48 overflow-y-auto">

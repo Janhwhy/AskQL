@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
@@ -15,7 +17,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { ChartDecision, Row } from "@/lib/types";
+import type { ChartDecision, DisplayType, Row } from "@/lib/types";
 
 const SERIES_COLORS = [
   "var(--color-series-1)",
@@ -27,6 +29,27 @@ const SERIES_COLORS = [
   "var(--color-series-7)",
   "var(--color-series-8)",
 ];
+
+/** Phase 8: a tile's chosen color is a palette SLOT, not a raw hex -- it
+ * rotates the validated palette to start there, so a multi-series chart
+ * still gets 8 distinct CVD-safe hues, just led by the chosen one. */
+function rotatedPalette(color: number | null | undefined): string[] {
+  if (!color) return SERIES_COLORS;
+  const k = (color - 1) % SERIES_COLORS.length;
+  return [...SERIES_COLORS.slice(k), ...SERIES_COLORS.slice(0, k)];
+}
+
+type Height = number | `${number}%`;
+
+interface ViewProps {
+  rows: Row[];
+  chart: ChartDecision;
+  height: Height;
+  palette: string[];
+  /** Single-series charts: the one color to draw with. */
+  solo: string;
+  showLegend: boolean;
+}
 
 /**
  * Formats by what the COLUMN NAME says the value is, not by guessing from
@@ -116,73 +139,73 @@ function pivotBySeries(rows: Row[], x: string, y: string, series: string) {
 const tooltipStyle = {
   background: "var(--color-surface-raised)",
   border: "1px solid var(--color-border-strong)",
-  borderRadius: 8,
+  borderRadius: 10,
   fontSize: 13,
   padding: "8px 12px",
-  boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
+  boxShadow: "0 10px 30px -10px rgba(0,0,0,0.35)",
 };
 
-function KpiTile({ rows, y }: { rows: Row[]; y: string }) {
+const legendStyle = { fontSize: 12, color: "var(--color-ink-secondary)" };
+
+function SwatchLegend({ items }: { items: { label: string; color: string }[] }) {
+  return (
+    <div className="mt-3 flex shrink-0 flex-wrap gap-x-4 gap-y-1.5">
+      {items.map(({ label, color }) => (
+        <span key={label} className="flex items-center gap-1.5 text-xs text-ink-secondary">
+          <span className="h-2.5 w-2.5 rounded-sm" style={{ background: color }} />
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function KpiTile({ rows, y, fill }: { rows: Row[]; y: string; fill: boolean }) {
   // No separate caption here on purpose — the narration sentence directly
   // above already gives full context (CLAUDE.md's "hero number" pattern:
   // a standalone stat needs surrounding prose, not a second, redundant
   // label repeating the question back).
   const value = rows[0]?.[y];
   return (
-    <span className="block py-1 text-[clamp(2rem,5vw,2.75rem)] font-semibold tracking-tight tabular-nums text-ink-primary">
+    <span
+      className={
+        fill
+          ? "font-display flex h-full items-center text-[clamp(2.4rem,5vw,4.25rem)] leading-none tabular-nums text-ink-primary"
+          : "font-display block py-1 text-[clamp(2.8rem,6vw,4rem)] leading-none tabular-nums text-ink-primary"
+      }
+    >
       {formatValue(value, y)}
     </span>
   );
 }
 
-function LineChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecision; height: number | `${number}%` }) {
+/** Line and area share everything but the mark. */
+function LineChartView({ rows, chart, height, palette, solo, showLegend, area }: ViewProps & { area: boolean }) {
   const { x, y, series } = chart;
   if (!x || !y) return null;
+  const Chart = area ? AreaChart : LineChart;
 
-  if (series) {
-    const { data, seriesKeys } = pivotBySeries(rows, x, y, series);
-    return (
-      <ResponsiveContainer width="100%" height={height}>
-        <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
-          <XAxis
-            dataKey={(row) => row[x]}
-            tickFormatter={formatAxisTick}
-            stroke="var(--color-ink-muted)"
-            fontSize={12}
-            tickLine={false}
-            axisLine={{ stroke: "var(--color-border-strong)" }}
-          />
-          <YAxis
-            tickFormatter={formatAxisTick}
-            stroke="var(--color-ink-muted)"
-            fontSize={12}
-            tickLine={false}
-            axisLine={false}
-            width={48}
-          />
-          <Tooltip contentStyle={tooltipStyle} labelFormatter={formatAxisTick} formatter={(v, name) => formatValue(v, String(name))} />
-          <Legend wrapperStyle={{ fontSize: 12, color: "var(--color-ink-secondary)" }} />
-          {seriesKeys.map((key, i) => (
-            <Line
-              key={key}
-              type="monotone"
-              dataKey={(row) => row[key]}
-              stroke={SERIES_COLORS[i % SERIES_COLORS.length]}
-              strokeWidth={2}
-              dot={false}
-              activeDot={{ r: 4 }}
-              isAnimationActive={false}
-            />
-          ))}
-        </LineChart>
-      </ResponsiveContainer>
-    );
-  }
+  const pivot = series ? pivotBySeries(rows, x, y, series) : null;
+  const data = pivot ? pivot.data : rows;
+  const keys = pivot ? pivot.seriesKeys : [y];
+  const colorAt = (i: number) => (pivot ? palette[i % palette.length] : solo);
+  // Area fills fade top->bottom from their stroke color. One gradient per
+  // series, id-scoped by a per-render prefix so two tiles never collide.
+  const gid = `g${Math.abs(hash(`${x}|${y}|${palette[0]}|${keys.join()}`))}`;
 
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <LineChart data={rows} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+      <Chart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+        {area && (
+          <defs>
+            {keys.map((_, i) => (
+              <linearGradient key={i} id={`${gid}-${i}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={colorAt(i)} stopOpacity={0.34} />
+                <stop offset="100%" stopColor={colorAt(i)} stopOpacity={0.02} />
+              </linearGradient>
+            ))}
+          </defs>
+        )}
         <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
         <XAxis
           dataKey={(row) => row[x]}
@@ -200,22 +223,50 @@ function LineChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecis
           axisLine={false}
           width={48}
         />
-        <Tooltip contentStyle={tooltipStyle} labelFormatter={formatAxisTick} formatter={(v, name) => formatValue(v, String(name))} />
-        <Line
-          type="monotone"
-          dataKey={(row) => row[y]}
-          stroke="var(--color-series-2)"
-          strokeWidth={2.5}
-          dot={rows.length <= 20}
-          activeDot={{ r: 4 }}
-          isAnimationActive={false}
+        <Tooltip
+          contentStyle={tooltipStyle}
+          labelFormatter={formatAxisTick}
+          formatter={(v, name) => formatValue(v, pivot ? y : String(name))}
         />
-      </LineChart>
+        {pivot && showLegend && <Legend wrapperStyle={legendStyle} />}
+        {keys.map((key, i) =>
+          area ? (
+            <Area
+              key={key}
+              type="monotone"
+              dataKey={(row) => row[key]}
+              name={key}
+              stroke={colorAt(i)}
+              fill={`url(#${gid}-${i})`}
+              strokeWidth={pivot ? 2 : 2.5}
+              isAnimationActive={false}
+            />
+          ) : (
+            <Line
+              key={key}
+              type="monotone"
+              dataKey={(row) => row[key]}
+              name={key}
+              stroke={colorAt(i)}
+              strokeWidth={pivot ? 2 : 2.5}
+              dot={!pivot && rows.length <= 20}
+              activeDot={{ r: 4 }}
+              isAnimationActive={false}
+            />
+          )
+        )}
+      </Chart>
     </ResponsiveContainer>
   );
 }
 
-function BarChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecision; height: number | `${number}%` }) {
+function hash(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+function BarChartView({ rows, chart, height, palette, solo, showLegend }: ViewProps) {
   const { x, y, series } = chart;
   if (!x || !y) return null;
 
@@ -280,10 +331,18 @@ function BarChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecisi
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
             <XAxis {...xAxisProps} />
             <YAxis {...yAxisProps} />
-            <Tooltip contentStyle={tooltipStyle} formatter={(v, name) => formatValue(v, String(name))} cursor={{ fill: "var(--color-accent-wash)" }} />
-            <Legend wrapperStyle={{ fontSize: 12, color: "var(--color-ink-secondary)" }} />
+            <Tooltip contentStyle={tooltipStyle} formatter={(v) => formatValue(v, y)} cursor={{ fill: "var(--color-accent-wash)" }} />
+            {showLegend && <Legend wrapperStyle={legendStyle} />}
             {seriesKeys.map((key, i) => (
-              <Bar key={key} dataKey={(row) => row[key]} fill={SERIES_COLORS[i % SERIES_COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={40} isAnimationActive={false} />
+              <Bar
+                key={key}
+                dataKey={(row) => row[key]}
+                name={key}
+                fill={palette[i % palette.length]}
+                radius={[3, 3, 0, 0]}
+                maxBarSize={40}
+                isAnimationActive={false}
+              />
             ))}
           </BarChart>
         </ResponsiveContainer>
@@ -293,7 +352,7 @@ function BarChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecisi
     // Each x is unique — one bar per row, colored by its series value
     // (e.g. product -> category) instead of faking a grouped series.
     const seriesValues = Array.from(new Set(rows.map((r) => String(r[series]))));
-    const colorFor = (v: string) => SERIES_COLORS[seriesValues.indexOf(v) % SERIES_COLORS.length];
+    const colorFor = (v: string) => palette[seriesValues.indexOf(v) % palette.length];
     return (
       // flex column with the chart as the ONLY flex-1 child: a plain block
       // div's height is auto (indefinite), which breaks CSS percentage-
@@ -311,13 +370,13 @@ function BarChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecisi
               <YAxis {...yAxisProps} />
               <Tooltip
                 contentStyle={tooltipStyle}
-                formatter={(v, name) => [formatValue(v, String(name)), String(name)]}
+                formatter={(v) => [formatValue(v, y), y]}
                 labelFormatter={(label, payload) =>
                   payload?.[0] ? `${label} — ${String(payload[0].payload[series])}` : label
                 }
                 cursor={{ fill: "var(--color-accent-wash)" }}
               />
-              <Bar dataKey={(row) => row[y]} radius={[3, 3, 0, 0]} maxBarSize={32} isAnimationActive={false}>
+              <Bar dataKey={(row) => row[y]} name={y} radius={[3, 3, 0, 0]} maxBarSize={32} isAnimationActive={false}>
                 {rows.map((row, i) => (
                   <Cell key={i} fill={colorFor(String(row[series]))} />
                 ))}
@@ -325,14 +384,7 @@ function BarChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecisi
             </BarChart>
           </ResponsiveContainer>
         </div>
-        <div className="mt-3 shrink-0 flex flex-wrap gap-x-4 gap-y-1.5">
-          {seriesValues.map((v) => (
-            <span key={v} className="flex items-center gap-1.5 text-xs text-ink-secondary">
-              <span className="h-2.5 w-2.5 rounded-sm" style={{ background: colorFor(v) }} />
-              {v}
-            </span>
-          ))}
-        </div>
+        {showLegend && <SwatchLegend items={seriesValues.map((v) => ({ label: v, color: colorFor(v) }))} />}
       </div>
     );
   }
@@ -343,8 +395,66 @@ function BarChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecisi
         <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
         <XAxis {...xAxisProps} />
         <YAxis {...yAxisProps} />
-        <Tooltip contentStyle={tooltipStyle} formatter={(v, name) => formatValue(v, String(name))} cursor={{ fill: "var(--color-accent-wash)" }} />
-        <Bar dataKey={(row) => row[y]} fill="var(--color-series-2)" radius={[3, 3, 0, 0]} maxBarSize={48} isAnimationActive={false} />
+        <Tooltip contentStyle={tooltipStyle} formatter={(v) => formatValue(v, y)} cursor={{ fill: "var(--color-accent-wash)" }} />
+        <Bar dataKey={(row) => row[y]} name={y} fill={solo} radius={[3, 3, 0, 0]} maxBarSize={48} isAnimationActive={false} />
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+/** Categories down the Y axis, read left-to-right with no rotation at all —
+ * the better display type for long category names (Phase 8). */
+function HorizontalBarView({ rows, chart, height, palette, solo, showLegend }: ViewProps) {
+  const { x, y, series } = chart;
+  if (!x || !y) return null;
+  const xValues = rows.map((r) => String(r[x]));
+  const grouped = series != null && new Set(xValues).size < xValues.length;
+  const pivot = grouped && series ? pivotBySeries(rows, x, y, series) : null;
+  const tagValues = !grouped && series ? Array.from(new Set(rows.map((r) => String(r[series])))) : [];
+  const colorFor = (v: string) => palette[tagValues.indexOf(v) % palette.length];
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={pivot ? pivot.data : rows} layout="vertical" margin={{ top: 4, right: 16, left: 4, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" horizontal={false} />
+        <XAxis
+          type="number"
+          tickFormatter={formatAxisTick}
+          stroke="var(--color-ink-muted)"
+          fontSize={12}
+          tickLine={false}
+          axisLine={false}
+        />
+        <YAxis
+          type="category"
+          dataKey={(row: Row) => row[x]}
+          tickFormatter={(v) => formatCategoryTick(formatAxisTick(v))}
+          stroke="var(--color-ink-muted)"
+          fontSize={12}
+          tickLine={false}
+          axisLine={{ stroke: "var(--color-border-strong)" }}
+          width={128}
+          interval={0}
+        />
+        <Tooltip contentStyle={tooltipStyle} formatter={(v) => formatValue(v, y)} cursor={{ fill: "var(--color-accent-wash)" }} />
+        {pivot && showLegend && <Legend wrapperStyle={legendStyle} />}
+        {pivot ? (
+          pivot.seriesKeys.map((key, i) => (
+            <Bar
+              key={key}
+              dataKey={(row) => row[key]}
+              name={key}
+              fill={palette[i % palette.length]}
+              radius={[0, 3, 3, 0]}
+              maxBarSize={22}
+              isAnimationActive={false}
+            />
+          ))
+        ) : (
+          <Bar dataKey={(row) => row[y]} name={y} fill={solo} radius={[0, 3, 3, 0]} maxBarSize={26} isAnimationActive={false}>
+            {series && rows.map((row, i) => <Cell key={i} fill={colorFor(String(row[series]))} />)}
+          </Bar>
+        )}
       </BarChart>
     </ResponsiveContainer>
   );
@@ -353,7 +463,7 @@ function BarChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecisi
 const PIE_SLICE_CAP = 8; // matches SERIES_COLORS.length — beyond this a pie
 // is unreadable regardless of what was asked for, so fall back to a bar.
 
-function PieChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecision; height: number | `${number}%` }) {
+function PieChartView({ rows, chart, height, palette, solo, showLegend, donut }: ViewProps & { donut: boolean }) {
   const { x, y } = chart;
   if (!x || !y) return null;
 
@@ -364,7 +474,7 @@ function PieChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecisi
           Too many slices for a readable pie ({rows.length}) — showing as a bar chart instead.
         </p>
         <div className="min-h-0 flex-1">
-          <BarChartView rows={rows} chart={{ ...chart, chart_type: "bar" }} height={height} />
+          <BarChartView rows={rows} chart={{ ...chart, chart_type: "bar" }} height={height} palette={palette} solo={solo} showLegend={showLegend} />
         </div>
       </div>
     );
@@ -377,22 +487,30 @@ function PieChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecisi
     // ResponsiveContainer's height="100%" only resolves through a parent
     // with a DEFINITE height, which a plain block div (height:auto) isn't.
     <div className="flex h-full flex-col">
-      <div className="min-h-0 flex-1">
+      <div className="relative min-h-0 flex-1">
+        {donut && (
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+            <span className="kicker">Total</span>
+            <span className="font-display text-[1.6rem] leading-tight tabular-nums text-ink-primary">
+              {formatValue(total, y)}
+            </span>
+          </div>
+        )}
         <ResponsiveContainer width="100%" height={height}>
           <PieChart>
             <Pie
               data={rows}
               dataKey={(row) => row[y]}
               nameKey={(row) => row[x]}
-              innerRadius={56}
-              outerRadius={100}
-              paddingAngle={2}
+              innerRadius={donut ? "62%" : 0}
+              outerRadius="90%"
+              paddingAngle={donut ? 2 : 1}
               stroke="var(--color-surface)"
               strokeWidth={2}
               isAnimationActive={false}
             >
               {rows.map((_, i) => (
-                <Cell key={i} fill={SERIES_COLORS[i % SERIES_COLORS.length]} />
+                <Cell key={i} fill={palette[i % palette.length]} />
               ))}
             </Pie>
             <Tooltip
@@ -405,31 +523,26 @@ function PieChartView({ rows, chart, height }: { rows: Row[]; chart: ChartDecisi
           </PieChart>
         </ResponsiveContainer>
       </div>
-      <div className="mt-3 shrink-0 flex flex-wrap gap-x-4 gap-y-1.5">
-        {rows.map((row, i) => (
-          <span key={i} className="flex items-center gap-1.5 text-xs text-ink-secondary">
-            <span className="h-2.5 w-2.5 rounded-sm" style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }} />
-            {String(row[x])}
-          </span>
-        ))}
-      </div>
+      {showLegend && (
+        <SwatchLegend items={rows.map((row, i) => ({ label: String(row[x]), color: palette[i % palette.length] }))} />
+      )}
     </div>
   );
 }
 
-function TableView({ rows, columns }: { rows: Row[]; columns: string[] }) {
+function TableView({ rows, columns, fill }: { rows: Row[]; columns: string[]; fill: boolean }) {
   if (rows.length === 0) {
     return <p className="py-4 text-sm text-ink-muted">No rows returned.</p>;
   }
   return (
-    <div className="max-h-80 overflow-auto rounded-lg border border-border">
+    <div className={`${fill ? "h-full" : "max-h-80"} overflow-auto rounded-xl border border-border`}>
       <table className="w-full border-collapse text-sm">
-        <thead className="sticky top-0 bg-surface-raised">
+        <thead className="sticky top-0 z-[1] bg-surface-raised">
           <tr>
             {columns.map((col) => (
               <th
                 key={col}
-                className="border-b border-border px-3 py-2 text-left font-medium text-ink-secondary"
+                className="border-b border-border-strong px-3 py-2 text-left font-mono text-[10.5px] font-medium tracking-wider text-ink-muted uppercase"
               >
                 {col}
               </th>
@@ -438,7 +551,7 @@ function TableView({ rows, columns }: { rows: Row[]; columns: string[] }) {
         </thead>
         <tbody>
           {rows.map((row, i) => (
-            <tr key={i} className="odd:bg-surface even:bg-surface-raised/40">
+            <tr key={i} className="transition-colors hover:bg-accent-wash">
               {columns.map((col) => (
                 <td key={col} className="border-b border-border px-3 py-2 tabular-nums text-ink-primary">
                   {formatValue(row[col], col)}
@@ -457,6 +570,9 @@ export function ChartRenderer({
   rows,
   columns,
   height = 280,
+  displayType,
+  color,
+  showLegend = true,
 }: {
   chart: ChartDecision;
   rows: Row[];
@@ -472,19 +588,48 @@ export function ChartRenderer({
    * paths with real geometry and opacity:1, but visually never finished
    * drawing. Letting ResponsiveContainer own its own measurement removes
    * the loop entirely. */
-  height?: number | `${number}%`;
+  height?: Height;
+  /** Phase 8 tile override — the SAME rows drawn another way. Unset =
+   * the agent's own decide_chart choice. */
+  displayType?: DisplayType | null;
+  /** Palette slot 1-8 to lead with (tile customization). */
+  color?: number | null;
+  showLegend?: boolean;
 }) {
-  if (chart.chart_type === "kpi" && chart.y) {
-    return <KpiTile rows={rows} y={chart.y} />;
+  const type: DisplayType = displayType ?? chart.chart_type;
+  const palette = rotatedPalette(color);
+  const solo = color ? palette[0] : "var(--color-series-2)";
+  const fill = height === "100%";
+  const view = { rows, chart, height, palette, solo, showLegend };
+
+  if (type === "kpi" && chart.y) {
+    return <KpiTile rows={rows} y={chart.y} fill={fill} />;
   }
-  if (chart.chart_type === "line") {
-    return <LineChartView rows={rows} chart={chart} height={height} />;
+  if ((type === "line" || type === "area") && chart.x && chart.y) {
+    return <LineChartView {...view} area={type === "area"} />;
   }
-  if (chart.chart_type === "bar") {
-    return <BarChartView rows={rows} chart={chart} height={height} />;
+  if (type === "bar" && chart.x && chart.y) {
+    return <BarChartView {...view} />;
   }
-  if (chart.chart_type === "pie") {
-    return <PieChartView rows={rows} chart={chart} height={height} />;
+  if (type === "hbar" && chart.x && chart.y) {
+    return <HorizontalBarView {...view} />;
   }
-  return <TableView rows={rows} columns={columns} />;
+  if ((type === "pie" || type === "donut") && chart.x && chart.y) {
+    return <PieChartView {...view} donut={type === "donut"} />;
+  }
+  return <TableView rows={rows} columns={columns} fill={fill} />;
+}
+
+/** Which display types make sense for this result. The tile inspector only
+ * offers these, so a customization can never produce an empty chart. */
+export function compatibleDisplayTypes(chart: ChartDecision, rows: Row[]): DisplayType[] {
+  const types: DisplayType[] = [];
+  if (chart.y && rows.length === 1) types.push("kpi");
+  if (chart.x && chart.y) {
+    types.push("line", "area", "bar", "hbar");
+    const xIsTime = rows.length > 0 && /^\d{4}-\d{2}-\d{2}/.test(String(rows[0][chart.x]));
+    if (!xIsTime && !chart.series && rows.length <= PIE_SLICE_CAP) types.push("pie", "donut");
+  }
+  types.push("table");
+  return types;
 }

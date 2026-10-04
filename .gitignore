@@ -20,3 +20,5 @@ node_modules/
 .next/
 web/test-results/
 web/playwright-report/
+data/chats.sqlite3
+data/checkpoints.sqlite3*

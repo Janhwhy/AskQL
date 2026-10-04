@@ -5,78 +5,109 @@ import type { Turn } from "@/lib/types";
 import { ChartRenderer } from "./ChartRenderer";
 import { ClarificationChips } from "./ClarificationChips";
 import { PinButton } from "./PinButton";
-import { SqlPanel } from "./SqlPanel";
+import { SqlButton } from "./SqlButton";
 import { StageIndicator } from "./StageIndicator";
 
+/** Insight sentence, revealed word by word -- only for an answer that just
+ * arrived; a reopened chat shows its text immediately. */
+function Narration({ text, animate }: { text: string; animate: boolean }) {
+  if (!animate) return <>{text}</>;
+  return (
+    <>
+      {text.split(/(\s+)/).map((w, i) =>
+        /^\s+$/.test(w) ? (
+          w
+        ) : (
+          <span key={i} className="animate-word inline-block" style={{ animationDelay: `${Math.min(i, 80) * 18}ms` }}>
+            {w}
+          </span>
+        )
+      )}
+    </>
+  );
+}
+
+/**
+ * One question + its answer, laid out like an entry in a notebook rather
+ * than a chat bubble: an index, the question set as a headline, and the
+ * answer as a readout beneath it.
+ */
 export function MessageTurn({
   turn,
+  index,
   onClarify,
+  disabled,
 }: {
   turn: Turn;
+  index: number;
   onClarify: (answer: string) => void;
+  disabled?: boolean;
 }) {
+  const fresh = turn.fresh === true;
   return (
-    <div className="animate-fade-up flex flex-col gap-3">
-      {/* the question */}
-      <div className="flex justify-end">
-        <div className="max-w-[75%] rounded-2xl rounded-br-sm bg-accent px-4 py-2.5 text-[15px] text-accent-ink">
+    <article className="animate-rise flex flex-col gap-5" data-testid="turn">
+      <header className="flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <span className="kicker !text-accent">Q{index}</span>
+          <span className="h-px flex-1 bg-gradient-to-r from-border-strong to-transparent" />
+        </div>
+        <h2 className="font-display text-[clamp(1.45rem,2.8vw,1.9rem)] leading-[1.15] text-ink-primary">
           {turn.question}
-        </div>
-      </div>
+        </h2>
+      </header>
 
-      {/* the answer */}
-      <div className="flex justify-start">
-        <div className="w-full max-w-[85%] rounded-2xl rounded-bl-sm border border-border bg-surface px-5 py-4">
-          {turn.status === "streaming" && (
-            <StageIndicator label={turn.stageLabel ?? "Thinking…"} />
-          )}
+      <div className="panel relative rounded-[22px] px-5 py-5 sm:px-7 sm:py-6">
+        {turn.status === "streaming" && turn.stage && (
+          <StageIndicator stage={turn.stage} sql={turn.sql} retried={turn.retried} />
+        )}
 
-          {turn.retried && turn.status === "streaming" && (
-            <p className="mb-1 text-xs text-status-warning">
-              First attempt hit an error — retrying once…
-            </p>
-          )}
+        {turn.status === "clarification" && turn.clarification && (
+          <ClarificationChips
+            question={turn.clarification.question}
+            candidates={turn.clarification.candidates}
+            onPick={onClarify}
+            disabled={disabled}
+          />
+        )}
 
-          {turn.status === "clarification" && turn.clarification && (
-            <ClarificationChips
-              question={turn.clarification.question}
-              candidates={turn.clarification.candidates}
-              onPick={onClarify}
-            />
-          )}
-
-          {turn.status === "error" && (
-            <div className="flex items-start gap-2 text-sm text-ink-primary">
-              <AlertCircle size={16} className="mt-0.5 shrink-0 text-status-critical" />
-              <span>{turn.error}</span>
+        {turn.status === "error" && (
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-3 text-[14.5px] text-ink-primary">
+              <AlertCircle size={18} className="mt-0.5 shrink-0 text-status-critical" />
+              <div className="flex flex-col gap-1">
+                <span className="kicker !text-status-critical">Couldn&apos;t answer</span>
+                <span>{turn.error}</span>
+              </div>
             </div>
-          )}
+            {turn.sql && <SqlButton sql={turn.sql} />}
+          </div>
+        )}
 
-          {turn.status === "done" && (
-            <div className="flex flex-col gap-1">
-              {turn.narration && (
-                <p className="text-[15px] leading-relaxed text-ink-primary">{turn.narration}</p>
+        {turn.status === "done" && (
+          <div className="flex flex-col gap-5">
+            <div className="flex items-start justify-between gap-4">
+              {turn.narration ? (
+                <p className="max-w-[62ch] text-[17px] leading-relaxed text-ink-primary">
+                  <Narration text={turn.narration} animate={fresh} />
+                </p>
+              ) : (
+                <span />
               )}
-              {turn.chart && turn.rows && turn.columns && (
-                <div className="mt-2">
-                  <ChartRenderer chart={turn.chart} rows={turn.rows} columns={turn.columns} />
-                </div>
-              )}
-              {turn.chart && turn.sql && (
-                <div className="mt-2 flex justify-end">
-                  <PinButton
-                    question={turn.question}
-                    sql={turn.sql}
-                    chart={turn.chart}
-                    narration={turn.narration}
-                  />
-                </div>
-              )}
-              {turn.sql && <SqlPanel sql={turn.sql} />}
+              <div className="flex shrink-0 items-center gap-1.5">
+                {turn.sql && <SqlButton sql={turn.sql} />}
+                {turn.chart && turn.sql && (
+                  <PinButton question={turn.question} sql={turn.sql} chart={turn.chart} narration={turn.narration} />
+                )}
+              </div>
             </div>
-          )}
-        </div>
+            {turn.chart && turn.rows && turn.columns && (
+              <div className={fresh ? "animate-wipe -mx-1" : "-mx-1"}>
+                <ChartRenderer chart={turn.chart} rows={turn.rows} columns={turn.columns} />
+              </div>
+            )}
+          </div>
+        )}
       </div>
-    </div>
+    </article>
   );
 }

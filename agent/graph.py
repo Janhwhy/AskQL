@@ -11,15 +11,22 @@ instead of SQL:
                  (CLAUDE.md: "the project's differentiator... build it properly")
 
 Ambiguity resolution is remembered across calls that share a `thread_id`, via
-LangGraph's own MemorySaver checkpointer -- not a hand-rolled session store.
+LangGraph's own checkpointer -- not a hand-rolled session store. Phase 8 swapped
+the in-memory MemorySaver for a SqliteSaver (`data/checkpoints.sqlite3`): chats
+are now saved and reopened days later, and a reopened chat must still know what
+"now the same for 7 days" refers to after an API restart. A separate SQLite
+file, never DuckDB -- same constraint-1 reasoning as api/dashboards_db.py.
 """
 
 import logging
 import re
+import sqlite3
 from datetime import date
+from pathlib import Path
 from typing import Optional, TypedDict
 
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 
 from ingestion.db import get_connection
@@ -457,7 +464,17 @@ def _route_after_run(state: AgentState) -> str:
     return END  # give up honestly after one retry
 
 
-def build_graph():
+CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "data" / "checkpoints.sqlite3"
+
+
+def _default_checkpointer() -> BaseCheckpointSaver:
+    CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # check_same_thread=False: FastAPI runs sync endpoints on a threadpool;
+    # SqliteSaver serializes access with its own lock.
+    return SqliteSaver(sqlite3.connect(str(CHECKPOINT_PATH), check_same_thread=False))
+
+
+def build_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
     graph = StateGraph(AgentState)
     graph.add_node("generate_sql", generate_sql)
     graph.add_node("run_sql", run_sql)
@@ -474,7 +491,7 @@ def build_graph():
     graph.add_edge("decide_chart", "narrate")
     graph.add_edge("narrate", END)
 
-    return graph.compile(checkpointer=MemorySaver())
+    return graph.compile(checkpointer=checkpointer or _default_checkpointer())
 
 
 _GRAPH = None
@@ -485,6 +502,12 @@ def _graph():
     if _GRAPH is None:
         _GRAPH = build_graph()
     return _GRAPH
+
+
+def forget_thread(thread_id: str) -> None:
+    """Drops a thread's checkpointed agent context -- called when a chat is
+    deleted, so a deleted chat's context can't leak into a new one."""
+    _graph().checkpointer.delete_thread(thread_id)
 
 
 def ask(question: str, thread_id: Optional[str] = None, clarification_answer: Optional[str] = None) -> dict:

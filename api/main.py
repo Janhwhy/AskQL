@@ -22,6 +22,8 @@ from pydantic import BaseModel
 from agent.graph import ask_stream
 from ingestion import db
 
+from . import chats_db
+from .chats import router as chats_router
 from .dashboards import router as dashboards_router
 
 load_dotenv()
@@ -46,6 +48,7 @@ app.add_middleware(
 )
 
 app.include_router(dashboards_router)
+app.include_router(chats_router)
 
 
 @app.get("/health")
@@ -79,6 +82,11 @@ class ChatRequest(BaseModel):
     question: str | None = None
     thread_id: str | None = None
     clarification_answer: str | None = None
+    # False = keep the agent's thread context (clarification round-trips
+    # still work) but don't file it as a saved chat -- used by a dashboard's
+    # "ask to add a tile" bar, which isn't a conversation the user expects
+    # to find in their chat history.
+    save: bool = True
 
 
 def _default_json(o):
@@ -89,8 +97,50 @@ def _default_json(o):
     return str(o)
 
 
+def _turn_from_terminal_event(event: dict) -> dict | None:
+    """Maps ask_stream()'s terminal event onto a saved transcript turn --
+    the same shape web/lib/types.ts's Turn builds client-side live."""
+    stage = event.get("stage")
+    if stage == "done":
+        return {
+            "question": event.get("question"),
+            "status": "done",
+            "sql": event.get("sql"),
+            "columns": event.get("columns"),
+            "rows": event.get("rows"),
+            "chart": event.get("chart"),
+            "narration": event.get("narration"),
+        }
+    if stage == "error":
+        return {"question": event.get("question"), "status": "error", "sql": event.get("sql"), "error": event.get("error")}
+    if stage == "clarification":
+        return {
+            "question": event.get("question"),
+            "status": "clarification",
+            "clarification": {"question": event["clarification_needed"], "candidates": event["candidates"]},
+        }
+    return None
+
+
 def _sse_events(req: ChatRequest):
+    # Every thread_id is a saved chat (Phase 8). Persisted server-side on the
+    # terminal event, so the transcript can't disagree with what the agent's
+    # own checkpointed context recorded.
+    persist = bool(req.thread_id) and req.save
+    if persist:
+        chats_db.ensure_chat(req.thread_id, req.question)
     for event in ask_stream(req.question, thread_id=req.thread_id, clarification_answer=req.clarification_answer):
+        if persist:
+            turn = _turn_from_terminal_event(event)
+            if turn is not None:
+                try:
+                    chats_db.save_turn(
+                        req.thread_id, turn, replace_last_clarification=req.clarification_answer is not None
+                    )
+                except Exception:
+                    # Losing a transcript write must never kill the answer
+                    # the user is watching stream in.
+                    logging.getLogger("askql.chats").exception("failed to save chat turn")
         yield f"data: {json.dumps(event, default=_default_json)}\n\n"
 
 

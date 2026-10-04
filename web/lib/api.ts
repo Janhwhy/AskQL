@@ -1,6 +1,6 @@
 import type { ChatEvent, ChatRequest } from "./types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { API_URL } from "./http";
 
 // Defense in depth against a raw network stall (not an application error —
 // those are caught server-side now and sent as a proper "error" event, see

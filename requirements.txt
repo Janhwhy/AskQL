@@ -10,3 +10,4 @@ httpx
 sqlglot
 langgraph
 google-genai
+langgraph-checkpoint-sqlite
