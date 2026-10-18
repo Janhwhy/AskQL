@@ -4,11 +4,7 @@
 
 **Governed answers, in plain English.**
 
-Ask a business question. Get a chart, an insight, and the SQL behind it — in under a second.
-
-![status](https://img.shields.io/badge/status-in%20development-orange)
-![python](https://img.shields.io/badge/python-3.11+-blue)
-![license](https://img.shields.io/badge/license-MIT-green)
+Ask a business question. Get a chart, a one-line insight, and the SQL behind it.
 
 </div>
 
@@ -17,36 +13,52 @@ Ask a business question. Get a chart, an insight, and the SQL behind it — in u
 ## The problem
 
 Dashboards don't fail because they're wrong. They fail because they're **slow to change**.
+A business user asks a new question, an analyst builds a new view, and a week later the
+question has moved on.
 
-A business user asks a new question. An analyst builds a new view. A week passes. By then
-the question has moved on.
-
-The obvious fix is a chatbot over your data — and the market is full of them. But
+A chatbot over your data is the obvious fix, and the market is full of them. But
 text-to-SQL has its own failure mode: **ungoverned answers can't be trusted.** Ask ten
-tools what "revenue" means and you'll get ten different queries. A confidently wrong
-number is worse than no number at all.
+tools what "revenue" means and you get ten different queries. A confidently wrong number
+is worse than no number.
 
 ## The approach
 
-AskQL puts a **semantic layer** between the question and the database.
-
-Metrics are defined once, in YAML, as a business decision — not a model guess:
+AskQL puts a **semantic layer** between the question and the database. Each metric is
+defined once, in YAML, as a business decision rather than a model guess:
 
 ```yaml
 metrics:
   revenue:
     description: "Total sales revenue"
     source: sales
-    join: "sales JOIN customers ON customers.customer_id = sales.customer_id"
-    expression: "SUM(sales.amount)"
-    group_by: ["customers.region", "products.category"]
+    join: "JOIN customers ON customers.customer_id = sales.customer_id JOIN ..."
+    time_column: sales.date
+    expression: sales.amount
+    aggregation: sum
     grain: day
+    dimensions: [customers.region, products.category, sales.channel, sales_reps.name]
 ```
 
-The agent reads these definitions. It never sees the raw schema. If a question doesn't
-map to a defined metric, it says so instead of improvising.
+The agent reads these definitions and never sees the raw schema. If a question doesn't
+map to a defined metric, it says so instead of improvising. Every answer comes with the
+SQL that produced it and the metric definition it applied.
 
-Every answer ships with the SQL that produced it and the metric definition it applied.
+---
+
+## Features
+
+- **Chat** that streams each pipeline stage live over SSE, then renders a chart and a
+  one-sentence insight.
+- **Ambiguity handling.** Asked *"how's support doing?"*, AskQL asks whether you mean
+  tickets opened, resolved, backlog or resolution time, and remembers your answer for
+  the rest of the conversation.
+- **Follow-ups that keep context.** *"Now the same for 7 days"* changes only the date
+  range; *"now as a table"* re-renders the same result without re-querying.
+- **Saved chats**: rename, pin, delete, and reopen them, with the agent's context
+  intact across server restarts.
+- **Reports**: pin any answer to a Power BI-style canvas with multiple pages,
+  free-form drag/resize with snapping, per-visual formatting, and rich text boxes.
+  Dashboards re-run their SQL on every load, so they always show today's numbers.
 
 ---
 
@@ -54,46 +66,52 @@ Every answer ships with the SQL that produced it and the metric definition it ap
 
 ```
 question
-  → router            classify intent
-  → metric retrieval  vector search over metric definitions
-  → ambiguity check   if 2+ metrics match, ask instead of guessing
-  → SQL generation
-  → validation        sqlglot — SELECT only, everything else rejected
-  → execute
-  → self-correct      on error, feed it back and retry once
-  → chart decision    {chart_type, x, y, series}
-  → narration         one line of insight
+  → generate_sql   LLM sees governed metric definitions only; may instead
+                   ask a clarifying question or refuse an out-of-scope one
+  → validate       sqlglot: one SELECT over governed tables, nothing else
+  → run_sql        read-only DuckDB connection, external file access disabled
+  → correct_sql    on an execution error, feed it back and retry once
+  → decide_chart   deterministic: {chart_type, x, y, series} from the result
+                   shape, or an explicit request ("as a pie chart")
+  → narrate        one sentence, built on pre-computed highs/lows
 ```
 
-The **ambiguity node** is the part most systems skip. Asked "how's growth?", AskQL
-responds *"by growth do you mean downloads or contributors?"* — and remembers the answer
-for the rest of the session.
+Anything that has a correct answer is computed in code, not left to the LLM: chart
+type, which metric a clarification refers to, and the highest/lowest values the
+narration cites. The LLM writes SQL and prose; it never draws images or does
+arithmetic.
+
+LLM calls go to **Gemini**, with a local **Ollama** model as automatic fallback on any
+Gemini failure (quota, network, missing key).
 
 ---
 
 ## The data
 
-A demo on a static CSV undercuts the whole premise — a dashboard-in-a-chat only means
-something if the numbers actually move day to day. So AskQL runs on **Northbeam**, a
-fully simulated B2B SaaS company: 24 products across 5 categories, regions, sales
-channels, reps, and a growing customer base, all clearly labelled as synthetic.
+A dashboard-in-a-chat only means something if the numbers move day to day, so AskQL
+runs on **Northbeam**, a fully simulated B2B SaaS company: 24 products across 5
+categories, regions, sales channels, reps, and a growing customer base. **All of it is
+synthetic** and labelled as such.
 
-Nothing here is scraped from the internet. Every number comes from a seeded, deterministic
-formula — trend + weekday pattern + seeded noise + rare seeded anomaly days — computed
-fresh once per day. No `random()` anywhere in the metric path: regenerating the full
-history from scratch reproduces it exactly, and a seeded anomaly day is a real event the
-bot can explain, not noise.
+Every number comes from a seeded, deterministic formula: growth trend × weekday pattern
+× seeded noise × rare seeded anomaly days. There's no unseeded randomness anywhere, so
+regenerating the history from scratch reproduces it exactly.
 
 | Table | Grows | What it holds |
 |---|---|---|
 | `products` | frozen | 24 products, 5 categories, price, growth rate |
-| `customers` | daily | signups, region, plan tier, churn |
-| `sales` | daily | date, product, customer, channel, amount |
+| `sales_reps` | frozen | 12 reps and their regions |
+| `customers` | daily | signups, region, plan tier, churn date |
+| `sales` | daily | date, product, customer, channel, quantity, amount |
 | `support_tickets` | daily | opened/closed, scoped to each product's own buyers |
 
-Dimensions (region, channel, plan tier) are never duplicated onto fact rows — a chart
-grouped by region does a live SQL `JOIN` through `customers` at ask-time, the same lookup
-an analyst would do by hand, just in under a second instead of a week.
+Dimensions are never duplicated onto fact rows; a chart by region joins through
+`customers` at query time, the same lookup an analyst would do by hand.
+
+**Governed metrics** (`metrics/*.yaml`): `revenue`, `average_deal_size`, `units_sold`,
+`new_customers`, `churned_customers`, `active_customers`, `churn_rate`,
+`support_tickets_opened`, `support_tickets_resolved`, `support_backlog`,
+`avg_resolution_time_days`.
 
 ---
 
@@ -101,79 +119,121 @@ an analyst would do by hand, just in under a second instead of a week.
 
 | Layer | Choice | Why |
 |---|---|---|
-| Storage | **DuckDB** + Parquet | Embedded, columnar, no server. Sub-second analytical queries |
-| Ingestion | `httpx` + APScheduler | Runs in-process — DuckDB allows one writer only |
-| Semantic layer | YAML + Pydantic | Metric definitions as code |
-| Retrieval | DuckDB VSS | Only relevant metrics enter the prompt |
-| Agent | **LangGraph** | Multi-node graph with self-correction |
-| Guardrails | `sqlglot` | SELECT-only validation before execution |
-| Backend | **FastAPI** + SSE | Token-streamed responses |
-| Frontend | Next.js, Recharts, Tailwind | Agent emits JSON; charts render client-side |
-| Tracing | Langfuse | Every node, every query, every failure |
+| Storage | **DuckDB** (single file) | Embedded and columnar; sub-second analytical queries with no server |
+| Data generation | Deterministic simulation | One generator, run daily by the OS scheduler |
+| Semantic layer | YAML + Pydantic | Metrics as code; a malformed definition fails loudly on load |
+| Agent | **LangGraph** | Explicit graph with retry, checkpointed per conversation |
+| Guardrails | `sqlglot` | SQL is parsed and checked before it runs |
+| LLM | Gemini, Ollama fallback | Free tier plus a local fallback that keeps working offline |
+| Backend | **FastAPI** + SSE | Real per-stage streaming |
+| App storage | SQLite | Chats, dashboards, and agent checkpoints, kept out of DuckDB |
+| Frontend | Next.js, React, Tailwind, Recharts | The agent emits chart JSON; charts render client-side |
 
-**Why DuckDB over Databricks?** Latency is the product thesis. Databricks cold starts run
-30 seconds or more — which recreates exactly the waiting problem this project exists to
+**Why DuckDB over a warehouse?** Latency is the product thesis. Warehouse cold starts
+run 30 seconds or more, which recreates the waiting problem this project exists to
 solve. At a few million rows, embedded beats distributed.
 
 ---
 
 ## Guardrails
 
-- Generated SQL is parsed and **rejected unless it's a plain `SELECT`**
-- The agent connects **read-only**
-- Query timeouts and row limits enforced at the engine
-- Derived metrics are always **labelled as modeled**, never presented as booked figures
-
----
-
-## Status
-
-In active development.
-
-- [x] Design and architecture
-- [x] Phase 0/1 — simulated company built: 24 products, daily generator, ~20 months
-      of history backfilled, unattended daily scheduler running
-- [x] Phase 2 — semantic layer: 10 governed metrics (`metrics/*.yaml`), Pydantic
-      validation, tested against the live schema
-- [x] Phase 3 — minimal agent: LangGraph node, Gemini + Ollama fallback,
-      sqlglot-guarded, read-only execution, 10/10 on the terminal test
-- [x] Phase 4 — full agent graph: self-correction (retry once), deterministic
-      chart-type decision, narration, ambiguity clarification with session
-      memory — 13/13 on the live test suite
-- [x] Phase 5 — frontend: Next.js chat UI, real SSE streaming, dark/light
-      themes, ambiguity chips, charts via Recharts (`web/`)
-- [ ] Phase 6 — tracing, caching, anomaly detection
+- Generated SQL must parse as **exactly one `SELECT`** that reads only the five governed
+  tables. Writes, DDL, table functions such as `read_csv(...)`, file paths, and other
+  schemas are all rejected.
+- Queries run on a **read-only** DuckDB connection with **external access disabled**, so
+  even SQL that slipped past validation can't read files or reach the network.
+- SQL saved to a dashboard is **re-validated every time it runs**, not trusted because
+  it passed once.
+- Rich text in reports passes an **allowlist HTML sanitizer** before it is stored.
 
 ---
 
 ## Getting started
 
-> Setup instructions land once Phase 1 is deployed.
+**Prerequisites:** Python 3.11+, Node 20+, and a
+[Gemini API key](https://aistudio.google.com/apikey) and/or
+[Ollama](https://ollama.com) with a code model pulled (`ollama pull qwen2.5-coder:7b`).
 
 ```bash
-git clone https://github.com/janhwhy/askql
-cd askql
-cp .env.example .env        # add your GitHub PAT
+git clone https://github.com/Janhwhy/AskQL.git
+cd AskQL
+
+# 1. Backend
 pip install -r requirements.txt
+cp .env.example .env              # add GEMINI_API_KEY and/or Ollama settings
+
+# 2. Generate the simulated company's history (a few minutes, run once)
+python -m ingestion.run_backfill
+
+# 3. Start the API (http://localhost:8000)
 uvicorn api.main:app --reload
+
+# 4. Start the frontend (http://localhost:3000), in a second terminal
+cd web
+npm install
+npm run dev
 ```
+
+To keep the data growing, schedule `python -m ingestion.run_daily_poll` once a day
+(Task Scheduler, cron, or launchd). It's idempotent: re-running a day that already
+exists does nothing.
+
+The frontend talks to `http://localhost:8000` by default; set `NEXT_PUBLIC_API_URL` to
+point it elsewhere. You can also ask questions without the UI:
+`python -m agent.cli`.
+
+---
+
+## Testing
+
+| Command | What it proves | Cost |
+|---|---|---|
+| `pytest` | SQL validation, metric loading, graph wiring, chart decisions, chats/dashboards API | Free, fast. `tests/test_metrics.py` needs the API stopped, since it opens DuckDB for writing |
+| `python -m agent.eval` | ~20 golden scenarios against the **real** LLM and database: right metric, date range, chart type, refusals, clarifications, follow-ups | Real LLM calls; exits 1 on any failure |
+| `cd web && npm run test:e2e` | Playwright in a real browser: charts actually draw, pinning, drag/resize, text formatting, saved chats | Needs both servers running |
+
+---
+
+## Project layout
+
+```
+agent/        LangGraph agent, SQL validation, chart decision, golden eval
+api/          FastAPI app: /chat (SSE), chats, dashboards, HTML sanitizer
+ingestion/    simulated company definition, daily generator, backfill
+metrics/      governed metric definitions (YAML) and their Pydantic loader
+tests/        pytest suite
+web/          Next.js frontend and Playwright e2e tests
+docs/         design spec and phase plans
+data/         DuckDB file, SQLite stores, backups (gitignored)
+```
+
+---
+
+## Roadmap
+
+- [x] Simulated company and deterministic daily generator, ~20 months backfilled
+- [x] Semantic layer: 11 governed metrics, validated against the live schema
+- [x] Agent: SQL generation, validation, self-correction, chart decision, narration,
+      ambiguity handling with session memory, follow-up context
+- [x] Chat UI with live streaming and saved chats
+- [x] Reports: multi-page free-form canvas, formatting, rich text
+- [x] Golden eval harness and browser e2e tests
+- [ ] Query timeouts and row caps at execution time
+- [ ] Latency measurement against the p95 < 1s target
+- [ ] Result caching
+- [ ] Tracing (Langfuse)
+- [ ] Proactive anomaly alerts
+- [ ] Authentication, before any public deploy
 
 ---
 
 ## Known tradeoffs
 
-Stated up front rather than discovered later:
-
 - **Single-writer DuckDB** caps deployment at one API instance. Scaling past that means
   moving to Postgres. Accepted deliberately in exchange for latency.
-- **No database-level permissions.** `sqlglot` validation substitutes for a read-only
-  role.
-- **Modeled revenue is not real revenue.** Always labelled as derived.
+- **No database-level permissions.** Validation plus a read-only, no-external-access
+  connection substitute for a read-only role.
+- **All data is simulated.** Northbeam is a demo company; its numbers are deterministic
+  and internally consistent, not real.
 - **Text-to-SQL is a crowded category.** The differentiation here is governance and
-  ambiguity handling — not the chatbot.
-
----
-
-## License
-
-MIT
+  ambiguity handling, not the chatbot itself.
