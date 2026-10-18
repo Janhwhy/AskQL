@@ -13,6 +13,15 @@ class UnsafeSQLError(ValueError):
     pass
 
 
+# The governed tables (ingestion/db.py's schema) — the only relations any
+# metric in metrics/*.yaml reads. A SELECT is not automatically a safe read:
+# DuckDB table functions (`read_text('/etc/hosts')`, `read_csv('.env')`,
+# `duckdb_settings()`) and quoted file paths (`FROM 'x.csv'`) are SELECTs
+# too, and would read arbitrary files from disk. So every FROM/JOIN target
+# must be one of these names (or a CTE defined in the same query).
+ALLOWED_TABLES = frozenset({"products", "sales_reps", "customers", "sales", "support_tickets"})
+
+
 def validate_select_only(sql: str) -> str:
     """Raises UnsafeSQLError unless `sql` parses as exactly one plain SELECT
     statement. Returns the SQL unchanged on success (so this can sit inline
@@ -40,5 +49,17 @@ def validate_select_only(sql: str) -> str:
     for node in stmt.walk():
         if isinstance(node, forbidden):
             raise UnsafeSQLError(f"forbidden clause found: {type(node).__name__}")
+
+    cte_names = {cte.alias_or_name.lower() for cte in stmt.find_all(exp.CTE)}
+    for table in stmt.find_all(exp.Table):
+        if not isinstance(table.this, exp.Identifier) or table.this.quoted:
+            # A function call (read_text(...), generate_series(...)) or a
+            # quoted string, which DuckDB treats as a file path.
+            raise UnsafeSQLError(f"only governed tables may be queried, got {table.this.sql('duckdb')}")
+        if table.catalog or (table.db and table.db.lower() != "main"):
+            raise UnsafeSQLError(f"only governed tables may be queried, got {table.sql('duckdb')}")
+        name = table.name.lower()
+        if name not in ALLOWED_TABLES and name not in cte_names:
+            raise UnsafeSQLError(f"unknown table: {table.name}")
 
     return sql

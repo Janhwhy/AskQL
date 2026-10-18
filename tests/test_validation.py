@@ -19,7 +19,7 @@ def test_select_with_join_and_group_by_passes():
 
 
 def test_union_of_selects_passes():
-    sql = "SELECT id FROM a UNION SELECT id FROM b"
+    sql = "SELECT customer_id FROM sales UNION SELECT customer_id FROM support_tickets"
     assert validate_select_only(sql) == sql
 
 
@@ -57,3 +57,39 @@ def test_multiple_statements_rejected():
 def test_unparseable_sql_rejected():
     with pytest.raises(UnsafeSQLError):
         validate_select_only("this is not sql at all !!!")
+
+
+def test_cte_names_are_allowed():
+    sql = "WITH daily AS (SELECT date, SUM(amount) AS r FROM sales GROUP BY date) SELECT * FROM daily"
+    assert validate_select_only(sql) == sql
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # Table functions and quoted paths are SELECTs that read arbitrary files.
+        "SELECT * FROM read_text('/etc/hosts')",
+        "SELECT * FROM read_csv_auto('.env')",
+        "SELECT * FROM 'data/askql.db'",
+        "SELECT * FROM duckdb_settings()",
+        "SELECT * FROM sales JOIN read_text('/etc/hosts') ON true",
+        "SELECT * FROM (SELECT * FROM read_text('/etc/hosts'))",
+        # Anything outside the governed tables, including other catalogs.
+        "SELECT * FROM information_schema.tables",
+        "SELECT * FROM other_db.main.sales",
+        "SELECT * FROM secrets",
+    ],
+)
+def test_non_governed_sources_rejected(sql):
+    with pytest.raises(UnsafeSQLError):
+        validate_select_only(sql)
+
+
+def test_every_metric_source_and_join_is_allowed():
+    """Keeps ALLOWED_TABLES in sync with metrics/*.yaml: a new metric over a
+    new table must fail here, not silently get every query rejected."""
+    from metrics.loader import load_metrics
+
+    for m in load_metrics().values():
+        sql = f"SELECT 1 FROM {m.source} {m.join or ''}"
+        validate_select_only(sql)
