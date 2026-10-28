@@ -22,3 +22,6 @@ web/test-results/
 web/playwright-report/
 data/chats.sqlite3
 data/checkpoints.sqlite3*
+
+# Generated project report (Word)
+report/
